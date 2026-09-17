@@ -1,0 +1,14 @@
+[package]
+name    = "rs-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rs-shared  = { path = "../rs-shared" }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+tokio      = { workspace = true }
+redis      = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
