@@ -12,8 +12,22 @@ The workspace is organized as a Cargo multi-crate workspace (`resolver = "3"`, e
 cex-rs/
 ├── Cargo.toml               # Workspace manifest
 ├── rs-shared/               # Common data contracts & Redis channel names
+│   └── src/
+│       ├── channels.rs      # Redis channel definitions
+│       └── models/          # Balance, order, request & response DTOs
 ├── rs-engine/               # In-memory Matching Engine & Balance Ledger
+│   └── src/
+│       ├── engine.rs        # BRPOP event loop runner & dispatcher
+│       ├── state.rs         # In-memory balance ledger & market state
+│       ├── orderbook/       # Limit order book (price-time priority matching)
+│       └── handlers/        # Channel message processors (account, order, market, admin)
 └── rs-gateway/              # Actix-web HTTP API & JWT Authentication
+    └── src/
+        ├── state.rs         # Gateway AppState & Redis connection pooling
+        ├── auth/            # JWT extractor & user credentials store
+        ├── dto/             # HTTP request bodies
+        ├── redis/           # Response queue listener & correlation bus
+        └── routes/          # Actix route handlers (auth, balance, orders, market, admin)
 ```
 
 ### Message Flow
@@ -44,17 +58,23 @@ cex-rs/
 * **Rust**: `rustc` / `cargo` (1.80+)
 * **Redis**: Running on `127.0.0.1:6379` (e.g. via Docker `docker run -d -p 6379:6379 redis:7-alpine`)
 
-### 2. Run the Engine
-In terminal 1:
+### 2. Run All Services (Single Command)
+Run both the matching engine and gateway concurrently:
 ```bash
-cd /home/pratik/projects/cex-rs
+make dev
+# or
+./dev.sh
+```
+Press `Ctrl+C` to gracefully terminate all services.
+
+### 3. Run Services Individually
+Terminal 1 (Matching Engine):
+```bash
 cargo run -p rs-engine
 ```
 
-### 3. Run the HTTP Gateway
-In terminal 2:
+Terminal 2 (HTTP Gateway):
 ```bash
-cd /home/pratik/projects/cex-rs
 cargo run -p rs-gateway
 ```
 The gateway starts on `http://127.0.0.1:3000`.
@@ -98,5 +118,5 @@ Result: **25 pass, 0 fail (172 assertions in ~360ms)**.
 
 ## 📖 In-Depth Documentation
 
-* [`ROADMAP.md`](./ROADMAP.md): Production hardening, database persistence, and advanced order types.
+* [`ROADMAP.md`](./notes/ROADMAP.md): Production hardening, database persistence, and advanced order types.
 * [`notes/`](./notes/): Technical deep-dive on Perpetual Futures (Perps), liquidations, funding rates, and Web3 Perp DEX architectures.

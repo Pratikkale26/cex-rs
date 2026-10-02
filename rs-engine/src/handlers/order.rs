@@ -1,139 +1,7 @@
-//! One async handler per Redis channel.
-//!
-//! # Balance accounting — the lock-first rule
-//!
-//! We lock funds BEFORE calling add_order():
-//!   - bid: lock `price * qty` USD  (available → locked)
-//!   - ask: lock `qty` SOL          (available → locked)
-//!
-//! Because both sides always have their payment in `locked` by the time
-//! the matching happens, the fill handler can ALWAYS do:
-//!   buyer.usd.locked  -= value        (never use available)
-//!   seller.sol.locked -= fill_qty     (never use available)
-//!
-//! This is simpler and more correct than the TypeScript approach which
-//! needed a takerSide field to distinguish locked vs available.
-
-use redis::AsyncCommands;
 use rs_shared::*;
 use crate::orderbook::{MatchResult, OrderbookError, Side, Trade};
 use crate::state::EngineState;
-
-// ── Helper: push reply to the gateway's reply queue ─────────────────────────
-
-async fn reply<T: serde::Serialize>(
-    publisher: &mut redis::aio::MultiplexedConnection,
-    queue_id:  &str,
-    payload:   &T,
-) {
-    let channel = format!("{}{}", REPLY_PREFIX, queue_id);
-    let json    = serde_json::to_string(payload).unwrap();
-    let _: ()   = publisher.lpush(channel, json).await.unwrap();
-}
-
-async fn reply_error(
-    publisher:   &mut redis::aio::MultiplexedConnection,
-    queue_id:    &str,
-    identifier:  &str,
-    error:       &str,
-    status_code: u16,
-) {
-    reply(publisher, queue_id, &OrderReply {
-        identifier:  identifier.to_string(),
-        order_id:    None,
-        status:      None,
-        error:       Some(error.to_string()),
-        status_code: Some(status_code),
-    }).await;
-}
-
-async fn reply_cancel_error(
-    publisher:  &mut redis::aio::MultiplexedConnection,
-    queue_id:   &str,
-    identifier: &str,
-    error:      &str,
-) {
-    reply(publisher, queue_id, &CancelReply {
-        identifier:    identifier.to_string(),
-        order_id:      None,
-        remaining_qty: None,
-        message:       None,
-        error:         Some(error.to_string()),
-    }).await;
-}
-
-// ── Handlers ─────────────────────────────────────────────────────────────────
-
-pub async fn handle_signup(
-    state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
-    msg:       SignupMsg,
-) {
-    // Initialise zero balances for the new user.
-    state.usd_balance.entry(msg.user_id).or_default();
-    state.stock_balance.entry(msg.user_id).or_default();
-
-    reply(publisher, &msg.queue_id, &BalanceReply {
-        identifier:    msg.identifier,
-        usd_balance:   state.usd_balance[&msg.user_id].clone(),
-        stock_balance: state.stock_balance[&msg.user_id].clone(),
-    }).await;
-}
-
-pub async fn handle_onramp(
-    state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
-    msg:       OnrampMsg,
-) {
-    state.usd_mut(msg.user_id).available += msg.qty;
-
-    let usd   = state.usd_balance.get(&msg.user_id).cloned().unwrap_or_default();
-    let stock = state.stock_balance.get(&msg.user_id).cloned().unwrap_or_default();
-
-    reply(publisher, &msg.queue_id, &BalanceReply {
-        identifier:    msg.identifier,
-        usd_balance:   usd,
-        stock_balance: stock,
-    }).await;
-}
-
-pub async fn handle_deposit(
-    state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
-    msg:       DepositMsg,
-) {
-    let symbol_balance = state.stock_balance
-        .entry(msg.user_id)
-        .or_default()
-        .entry(msg.symbol.clone())
-        .or_default();
-
-    symbol_balance.available += msg.qty;
-
-    let usd   = state.usd_balance.get(&msg.user_id).cloned().unwrap_or_default();
-    let stock = state.stock_balance.get(&msg.user_id).cloned().unwrap_or_default();
-
-    reply(publisher, &msg.queue_id, &BalanceReply {
-        identifier:    msg.identifier,
-        usd_balance:   usd,
-        stock_balance: stock,
-    }).await;
-}
-
-pub async fn handle_balance(
-    state:     &EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
-    msg:       BalanceQueryMsg,
-) {
-    let usd   = state.usd_balance.get(&msg.user_id).cloned().unwrap_or_default();
-    let stock = state.stock_balance.get(&msg.user_id).cloned().unwrap_or_default();
-
-    reply(publisher, &msg.queue_id, &BalanceReply {
-        identifier:    msg.identifier,
-        usd_balance:   usd,
-        stock_balance: stock,
-    }).await;
-}
+use super::{reply, reply_cancel_error, reply_error};
 
 pub async fn handle_order(
     state:     &mut EngineState,
@@ -262,7 +130,6 @@ pub async fn handle_cancel(
             // Refund the locked funds for the remaining (unfilled) qty.
             // locked = remaining_qty * price  (for bids)
             // locked = remaining_qty           (for asks)
-            use crate::orderbook::Side;
             match cancelled.side {
                 Side::Bid => {
                     let refund = cancelled.price * cancelled.remaining_qty;
@@ -288,35 +155,6 @@ pub async fn handle_cancel(
     }
 }
 
-pub async fn handle_get_orderbook(
-    state:     &EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
-    msg:       OrderbookQueryMsg,
-) {
-    if msg.asset != "sol" {
-        // Unsupported asset — return empty book.
-        reply(publisher, &msg.queue_id, &OrderbookReply {
-            identifier: msg.identifier,
-            orderbook:  OrderbookData { bids: vec![], asks: vec![] },
-        }).await;
-        return;
-    }
-
-    let snap = state.sol_orderbook.get_state();
-
-    let bids = snap.bids.into_iter()
-        .map(|l| OrderbookLevel { price: l.price, qty: l.qty })
-        .collect();
-    let asks = snap.asks.into_iter()
-        .map(|l| OrderbookLevel { price: l.price, qty: l.qty })
-        .collect();
-
-    reply(publisher, &msg.queue_id, &OrderbookReply {
-        identifier: msg.identifier,
-        orderbook:  OrderbookData { bids, asks },
-    }).await;
-}
-
 pub async fn handle_get_open_orders(
     state:     &EngineState,
     publisher: &mut redis::aio::MultiplexedConnection,
@@ -337,18 +175,5 @@ pub async fn handle_get_open_orders(
     reply(publisher, &msg.queue_id, &OpenOrdersReply {
         identifier: msg.identifier,
         orders,
-    }).await;
-}
-
-pub async fn handle_reset(
-    state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
-    msg:       ResetMsg,
-) {
-    state.reset();
-
-    reply(publisher, &msg.queue_id, &GenericReply {
-        identifier: msg.identifier,
-        message:    "Reset successful".to_string(),
     }).await;
 }

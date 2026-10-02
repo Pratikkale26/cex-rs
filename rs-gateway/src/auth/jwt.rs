@@ -6,14 +6,21 @@
 
 use actix_web::{FromRequest, HttpRequest, HttpResponse, ResponseError, dev::Payload, error::Error};
 use jsonwebtoken::{DecodingKey, Validation, decode};
-use std::future::{Ready, ready};
+use serde::{Deserialize, Serialize};
 use std::fmt;
-
-use crate::types::Claims;
+use std::future::{Ready, ready};
 
 pub const JWT_SECRET: &[u8] = b"secret";
 
+/// JWT payload claims.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Claims {
+    pub sub: u64,
+    pub exp: usize,
+}
+
 /// The authenticated user's id, extracted from the JWT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthUser(pub u64);
 
 // ── Error type ───────────────────────────────────────────────────────────────

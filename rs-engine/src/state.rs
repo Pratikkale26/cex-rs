@@ -26,6 +26,15 @@ impl EngineState {
             sol_orderbook: Orderbook::new("SOL-USDT"),
         }
     }
+}
+
+impl Default for EngineState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EngineState {
 
     /// Wipe everything — used by the reset handler between tests.
     pub fn reset(&mut self) {
