@@ -2096,6 +2096,7 @@ dependencies = [
  "jsonwebtoken",
  "redis",
  "reqwest",
+ "rs-engine",
  "rs-shared",
  "serde",
  "serde_json",

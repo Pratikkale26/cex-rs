@@ -5,19 +5,11 @@
 //!   2. Deserialise the JSON payload.
 //!   3. Acquire a lock on EngineState, call the handler, release lock.
 //!   4. Handler publishes the reply to the gateway's response queue.
-//!
-//! Two separate Redis connections are used:
-//!   - `listener`  — used only for brpop (blocking ops need a dedicated conn)
-//!   - `publisher` — multiplexed, used for lpush replies
-
-pub mod engine;
-pub mod handlers;
-pub mod orderbook;
-pub mod state;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use state::EngineState;
+use rs_engine::state::EngineState;
+use rs_engine::engine;
 
 #[tokio::main]
 async fn main() {
