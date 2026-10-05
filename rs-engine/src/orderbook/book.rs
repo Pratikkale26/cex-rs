@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use serde::{Deserialize, Serialize};
 use super::types::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PriceLevel {
     pub(crate) orders: VecDeque<OrderId>,
 }
@@ -15,6 +16,7 @@ impl PriceLevel {
 ///
 /// Uses `BTreeMap` for naturally sorted price levels and `VecDeque` for
 /// FIFO queues within each level. A global `HashMap` gives O(1) order lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Orderbook {
     symbol:        String,
     next_order_id: OrderId,

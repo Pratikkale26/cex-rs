@@ -10,3 +10,4 @@ pub const CH_ORDERBOOK:   &str = "get-orderbook";
 pub const CH_OPEN_ORDERS: &str = "get-open-orders";
 pub const CH_RESET:       &str = "reset";
 pub const REPLY_PREFIX:   &str = "response-queue"; // + queue_id
+pub const STREAM_EVENTS:  &str = "engine-events"; // Redis stream WAL

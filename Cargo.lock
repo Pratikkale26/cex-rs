@@ -2284,11 +2284,13 @@ dependencies = [
 name = "rs-engine"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "proptest",
  "redis",
  "rs-shared",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 

@@ -4,9 +4,11 @@
 //! can take a lock, mutate, and release before sending the reply.
 
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 use rs_shared::Balance;
 use crate::orderbook::Orderbook;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineState {
     /// USD balance per user:  user_id → { available, locked }
     pub usd_balance:   HashMap<u64, Balance>,

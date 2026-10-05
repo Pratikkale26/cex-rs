@@ -1,14 +1,16 @@
 //! Core domain types for the order book and trade execution.
 
+use serde::{Deserialize, Serialize};
+
 pub type UserId   = u64;
 pub type OrderId  = u64;
 pub type Price    = u64;
 pub type Quantity = u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side { Bid, Ask }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Order {
     pub order_id:      OrderId,
     pub user_id:       UserId,
