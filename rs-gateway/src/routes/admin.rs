@@ -6,11 +6,14 @@ use crate::state::AppState;
 pub async fn reset(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    {
-        let mut users = state.users.lock().await;
-        users.clear();
-        state.user_index.store(0, std::sync::atomic::Ordering::SeqCst);
-    }
+    // Truncate users table and reset auto-increment identity
+    sqlx::query("TRUNCATE TABLE users RESTART IDENTITY CASCADE")
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            eprintln!("Database error during reset: {e}");
+            actix_web::error::ErrorInternalServerError("Database reset failed")
+        })?;
 
     let identifier = uuid::Uuid::new_v4().to_string();
     let msg = ResetMsg {

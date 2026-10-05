@@ -7,6 +7,23 @@ use rs_gateway::*;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgrespassword@127.0.0.1:5432/cex".to_string());
+
+    let db_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(20)
+        .connect(&database_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
+
+    // Run embedded migrations on startup
+    sqlx::migrate!("./migrations")
+        .run(&db_pool)
+        .await
+        .expect("Failed to run database migrations");
+
+    println!("rs-gateway: connected to PostgreSQL and applied migrations.");
+
     let redis_url = std::env::var("REDIS_URL")
         .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
@@ -35,7 +52,7 @@ async fn main() -> std::io::Result<()> {
     // Spawn response queue listener background task
     let listener_handle = redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
 
-    let app_state = web::Data::new(AppState::new(publisher, pending, queue_id));
+    let app_state = web::Data::new(AppState::new(db_pool, publisher, pending, queue_id));
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PORT")

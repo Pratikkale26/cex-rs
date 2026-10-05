@@ -16,17 +16,7 @@ pub async fn signup(
         })));
     }
 
-    // 1. Check if user already exists
-    {
-        let users = state.users.lock().await;
-        if users.iter().any(|u| u.username == body.username) {
-            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-                "message": "User already"
-            })));
-        }
-    }
-
-    // 2. Hash password with Argon2 outside the lock
+    // 1. Hash password with Argon2
     let hashed_password = hash_password(&body.password)
         .await
         .map_err(|e| {
@@ -34,24 +24,31 @@ pub async fn signup(
             actix_web::error::ErrorInternalServerError("Failed to hash password")
         })?;
 
-    // 3. Register user in gateway store
-    let user_id = {
-        let mut users = state.users.lock().await;
-        if users.iter().any(|u| u.username == body.username) {
+    // 2. Insert user into PostgreSQL (database unique constraint prevents duplicates)
+    let insert_result = sqlx::query_as::<_, User>(
+        "INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id, username, password_hash, created_at"
+    )
+    .bind(&body.username)
+    .bind(&hashed_password)
+    .fetch_one(&state.db)
+    .await;
+
+    let user = match insert_result {
+        Ok(u) => u,
+        Err(sqlx::Error::Database(db_err)) if db_err.is_unique_violation() => {
             return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
                 "message": "User already"
             })));
         }
-        let id = state.user_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        users.push(User {
-            id,
-            username: body.username.clone(),
-            password: hashed_password,
-        });
-        id
+        Err(e) => {
+            eprintln!("Database error during signup: {e}");
+            return Err(actix_web::error::ErrorInternalServerError("Database error"));
+        }
     };
 
-    // 4. Send signup event to Engine to initialize user balances
+    let user_id = user.id as u64;
+
+    // 3. Send signup event to Engine to initialize user balances
     let identifier = uuid::Uuid::new_v4().to_string();
     let msg = SignupMsg {
         user_id,
@@ -79,21 +76,29 @@ pub async fn signin(
         })));
     }
 
-    // 1. Lookup user in store
-    let (user_id, stored_hash) = {
-        let users = state.users.lock().await;
-        match users.iter().find(|u| u.username == body.username) {
-            Some(u) => (u.id, u.password.clone()),
-            None => {
-                return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-                    "message": "Incorrect credentials"
-                })));
-            }
-        }
-    }; // Lock is dropped here!
+    // 1. Lookup user in PostgreSQL
+    let user_opt = sqlx::query_as::<_, User>(
+        "SELECT id, username, password_hash, created_at FROM users WHERE username = $1"
+    )
+    .bind(&body.username)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        eprintln!("Database error during signin: {e}");
+        actix_web::error::ErrorInternalServerError("Database error")
+    })?;
 
-    // 2. Verify password with Argon2 (CPU-bound task in background thread)
-    let is_valid = verify_password(&body.password, &stored_hash).await;
+    let user = match user_opt {
+        Some(u) => u,
+        None => {
+            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "message": "Incorrect credentials"
+            })));
+        }
+    };
+
+    // 2. Verify password with Argon2
+    let is_valid = verify_password(&body.password, &user.password_hash).await;
     if !is_valid {
         return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
             "message": "Incorrect credentials"
@@ -102,7 +107,7 @@ pub async fn signin(
 
     // 3. Issue JWT
     let exp = chrono::Utc::now().timestamp() as usize + 24 * 3600;
-    let claims = Claims { sub: user_id, exp };
+    let claims = Claims { sub: user.id as u64, exp };
     let token = jsonwebtoken::encode(
         &jsonwebtoken::Header::default(),
         &claims,

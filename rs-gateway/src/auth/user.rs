@@ -1,7 +1,10 @@
-/// A user stored in the gateway's in-memory list.
-#[derive(Debug, Clone)]
+use sqlx::FromRow;
+
+/// A user record persisted in PostgreSQL.
+#[derive(Debug, Clone, FromRow)]
 pub struct User {
-    pub id:       u64,
-    pub username: String,
-    pub password: String,
+    pub id:            i64,
+    pub username:      String,
+    pub password_hash: String,
+    pub created_at:    chrono::DateTime<chrono::Utc>,
 }

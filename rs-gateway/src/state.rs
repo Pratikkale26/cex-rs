@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use sqlx::PgPool;
 use tokio::sync::{oneshot, Mutex};
-use crate::auth::User;
 
 pub struct AppState {
-    pub users:           Mutex<Vec<User>>,
-    pub user_index:      AtomicU64,
+    pub db:              PgPool,
     pub redis_publisher: Mutex<redis::aio::MultiplexedConnection>,
     pub pending:         Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     pub queue_id:        String,
@@ -14,13 +12,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(
+        db: PgPool,
         publisher: redis::aio::MultiplexedConnection,
         pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
         queue_id: String,
     ) -> Self {
         Self {
-            users:           Mutex::new(Vec::new()),
-            user_index:      AtomicU64::new(0),
+            db,
             redis_publisher: Mutex::new(publisher),
             pending,
             queue_id,

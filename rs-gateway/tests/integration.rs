@@ -22,8 +22,18 @@ async fn setup_app_state() -> Option<(web::Data<AppState>, tokio::task::JoinHand
     let reply_queue = format!("{}{}", rs_shared::REPLY_PREFIX, queue_id);
     let pending = Arc::new(Mutex::new(HashMap::new()));
 
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgrespassword@127.0.0.1:5432/cex".to_string());
+    let db_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .ok()?;
+
+    let _ = sqlx::migrate!("./migrations").run(&db_pool).await;
+
     let _listener_handle = rs_gateway::redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
-    let app_state = web::Data::new(AppState::new(publisher, pending, queue_id));
+    let app_state = web::Data::new(AppState::new(db_pool, publisher, pending, queue_id));
 
     // Spawn an in-process Matching Engine for the integration test
     #[allow(deprecated)]
