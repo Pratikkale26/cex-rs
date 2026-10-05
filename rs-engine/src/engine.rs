@@ -18,6 +18,31 @@ pub const ENGINE_CHANNELS: &[&str] = &[
     CH_RESET,
 ];
 
+/// Wait for either SIGINT (Ctrl+C) or SIGTERM on Unix systems.
+pub async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C signal handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => { sig.recv().await; }
+            Err(e) => eprintln!("Warning: failed to install SIGTERM handler: {e}"),
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
 /// Run the engine loop listening for incoming Redis requests via BRPOP.
 #[allow(deprecated)]
 pub async fn run_engine(
@@ -25,7 +50,7 @@ pub async fn run_engine(
     mut listener:  redis::aio::Connection,
     mut publisher: redis::aio::MultiplexedConnection,
 ) {
-    println!("rs-engine: listening on channels...");
+    println!("rs-engine: listening on channels (Ctrl+C or SIGTERM to stop)...");
 
     loop {
         // Build the BRPOP command for all channels with a 1-second timeout.
@@ -35,12 +60,22 @@ pub async fn run_engine(
         }
         cmd.arg(1_u64); // timeout in seconds
 
-        let result: redis::RedisResult<Option<(String, String)>> =
-            cmd.query_async(&mut listener).await;
+        let query_fut = async {
+            let res: redis::RedisResult<Option<(String, String)>> = cmd.query_async(&mut listener).await;
+            res
+        };
+
+        let result = tokio::select! {
+            _ = wait_for_shutdown_signal() => {
+                println!("\nrs-engine: Received shutdown signal. Exiting engine gracefully...");
+                break;
+            }
+            res = query_fut => res,
+        };
 
         let (channel, data) = match result {
             Ok(Some(pair)) => pair,
-            Ok(None)       => continue, // timeout, no message
+            Ok(None)       => continue, // timeout, loop checks for signals
             Err(e)         => {
                 eprintln!("rs-engine: Redis error: {e}");
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -101,4 +136,6 @@ pub async fn run_engine(
             }
         }
     }
+
+    println!("rs-engine: Shutdown complete.");
 }

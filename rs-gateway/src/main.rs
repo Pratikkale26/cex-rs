@@ -1,24 +1,9 @@
-pub mod auth;
-pub mod dto;
-pub mod redis;
-pub mod routes;
-pub mod state;
-
-// Backward-compatibility aliases for any existing internal paths
-pub mod types {
-    pub use crate::auth::User;
-    pub use crate::auth::Claims;
-    pub use crate::dto::*;
-}
-pub mod middleware {
-    pub use crate::auth::*;
-}
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use actix_web::{web, App, HttpServer};
 use tokio::sync::Mutex;
-pub use state::AppState;
+use rs_gateway::state::AppState;
+use rs_gateway::*;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -48,7 +33,7 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to connect to Redis (publisher)");
 
     // Spawn response queue listener background task
-    redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
+    let listener_handle = redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
 
     let app_state = web::Data::new(AppState::new(publisher, pending, queue_id));
 
@@ -58,14 +43,34 @@ async fn main() -> std::io::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
 
-    println!("rs-gateway running on http://{host}:{port}");
+    println!("rs-gateway running on http://{host}:{port} (Ctrl+C to stop)");
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
+            .wrap(rate_limit::RateLimitMiddleware::default())
             .configure(routes::configure)
     })
     .bind((host.as_str(), port))?
-    .run()
-    .await
+    .run();
+
+    let server_handle = server.handle();
+
+    // Signal handler for clean shutdown
+    let shutdown_signal = async {
+        let _ = tokio::signal::ctrl_c().await;
+        println!("\nrs-gateway: Received shutdown signal. Gracefully stopping server...");
+        server_handle.stop(true).await;
+    };
+
+    tokio::select! {
+        res = server => res?,
+        _ = shutdown_signal => {
+            println!("rs-gateway: HTTP server stopped.");
+        }
+    }
+
+    listener_handle.abort();
+    println!("rs-gateway: Shutdown complete.");
+    Ok(())
 }

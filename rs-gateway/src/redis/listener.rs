@@ -11,7 +11,7 @@ pub fn start_response_listener(
     mut listener: redis::aio::Connection,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     reply_queue: String,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let mut cmd = redis::cmd("BRPOP");
@@ -38,7 +38,7 @@ pub fn start_response_listener(
                 }
             }
         }
-    });
+    })
 }
 
 /// Send a JSON payload to a Redis channel and await the correlated response via oneshot.
