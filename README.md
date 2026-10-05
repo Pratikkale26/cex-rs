@@ -1,54 +1,99 @@
 # cex-rs
 
-A high-performance, asynchronous Centralized Exchange (CEX) backend built in **Rust** using **Tokio**, **Actix-web**, and **Redis**.
+A high-performance, purely asynchronous Centralized Cryptocurrency Exchange (CEX) backend built in **Rust** using **Tokio**, **Actix-web**, **Redis Streams**, and **PostgreSQL**.
+
+Built with an **LMAX-style memory-first architecture**, an append-only **Write-Ahead Log (WAL)**, periodic snapshotting with fast-forward replay recovery, and a mathematically closed **double-entry financial ledger**.
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture Overview
 
-The workspace is organized as a Cargo multi-crate workspace (`resolver = "3"`, edition 2024):
+For a comprehensive technical deep-dive, see [**`ARCHITECTURE.md`**](./ARCHITECTURE.md).
+
+```
+                                  [ HTTP / REST Clients ]
+                                             │
+                                             ▼
+                     ┌───────────────────────────────────────────────┐
+                     │                  rs-gateway                   │
+                     │           (Actix-web API Gateway)             │
+                     │  - Argon2id Password Hashing & JWT Auth       │
+                     │  - Token Bucket Rate Limiting & DTO Validate  │
+                     │  - Response Demuxer (oneshot channels)        │
+                     └───────┬───────────────────────────────▲───────┘
+                             │                               │
+            XADD (WAL)       │                               │ LPUSH (ephemeral reply)
+      "engine-events"        │                               │ "response-queue.{id}"
+                             ▼                               │
+                     ┌───────────────────────────────────────┴───────┐
+                     │               Redis 7 Cluster                 │
+                     │  - "engine-events": Append-only WAL Stream    │
+                     │  - "engine-executions": Async Worker Stream   │
+                     │  - "response-queue.*": Ephemeral Reply Queues │
+                     └───────┬───────────────────────────────▲───────┘
+                             │                               │
+        XREAD BLOCK          │                               │ Emit Executions
+     (Continuous Stream)     │                               │ & Replies
+                             ▼                               │
+                     ┌───────────────────────────────────────┴───────┐
+                     │                   rs-engine                   │
+                     │            (In-Memory Matching Core)          │
+                     │  - Deterministic Single-Writer Event Loop     │
+                     │  - Price-Time-Priority BTreeMap Orderbook     │
+                     │  - RAM Balance Ledger (Lock-First)            │
+                     └───────┬───────────────────────────────────────┘
+                             │
+     Periodic JSON Snapshot  │
+     (Every K Events / Boot) │
+                             ▼
+                     ┌───────────────────────────────────────────────┐
+                     │                 PostgreSQL 16                 │
+                     │  - users (Auth & Credentials)                 │
+                     │  - engine_snapshots (State Recovery)          │
+                     │  - trades (Fill History)                      │
+                     │  - orders (Order Lifecycle)                   │
+                     │  - ledger_entries (Double-Entry Audit)        │
+                     │  - execution_checkpoints (Stream Offsets)     │
+                     └───────────────────────────────────────────────┘
+                             ▲
+                             │ Bulk Batch INSERT
+                             │ (Up to 100 events / tx)
+                     ┌───────┴───────────────────────────────────────┐
+                     │         Async Cold-Path Batch Worker          │
+                     │   (Drains "engine-executions" into Postgres)  │
+                     └───────────────────────────────────────────────┘
+```
+
+---
+
+## 📦 Workspace Structure
 
 ```
 cex-rs/
-├── Cargo.toml               # Workspace manifest
-├── rs-shared/               # Common data contracts & Redis channel names
+├── Cargo.toml               # Workspace manifest (Rust 2024 edition, resolver 3)
+├── docker-compose.yml       # PostgreSQL 16 & Redis 7 development services
+├── ARCHITECTURE.md          # Comprehensive architectural & technical specification
+├── rs-shared/               # Universal domain contracts & models
 │   └── src/
-│       ├── channels.rs      # Redis channel definitions
-│       └── models/          # Balance, order, request & response DTOs
-├── rs-engine/               # In-memory Matching Engine & Balance Ledger
+│       ├── channels.rs      # Redis stream keys & queue prefixes
+│       └── models/          # Execution events, DTOs, requests & responses
+├── rs-engine/               # Matching Engine & In-Memory State Machine
 │   └── src/
-│       ├── engine.rs        # BRPOP event loop runner & dispatcher
+│       ├── engine.rs        # Stream event loop runner & deterministic replay
+│       ├── snapshot.rs      # PostgreSQL snapshot load / save logic
 │       ├── state.rs         # In-memory balance ledger & market state
-│       ├── orderbook/       # Limit order book (price-time priority matching)
-│       └── handlers/        # Channel message processors (account, order, market, admin)
-└── rs-gateway/              # Actix-web HTTP API & JWT Authentication
+│       ├── orderbook/       # BTreeMap + VecDeque price-time priority book
+│       └── handlers/        # Channel message processors & execution emitters
+└── rs-gateway/              # HTTP API, Security & Cold-Path Persistence
+    ├── migrations/          # SQL database migrations (users, snapshots, ledger)
     └── src/
-        ├── state.rs         # Gateway AppState & Redis connection pooling
-        ├── auth/            # JWT extractor & user credentials store
-        ├── dto/             # HTTP request bodies
-        ├── redis/           # Response queue listener & correlation bus
-        └── routes/          # Actix route handlers (auth, balance, orders, market, admin)
+        ├── auth/            # Argon2id password hashing & JWT extractor
+        ├── dto/             # Request & response Data Transfer Objects
+        ├── ledger/          # Async cold-path batch worker (PostgreSQL sink)
+        ├── rate_limit/      # Token Bucket anti-spam middleware
+        ├── redis/           # WAL stream producer & response demuxer
+        └── routes/          # Actix route handlers (auth, balance, orders, trades, ledger)
 ```
-
-### Message Flow
-
-```
-[ HTTP Client ]
-      │
-      ▼  (1. JSON Request)
-┌─────────────┐       (2. LPUSH request)       ┌─────────────┐
-│  rs-gateway │ ─────────────────────────────► │  rs-engine  │
-│ (Actix-web) │                                │  (Matching) │
-│             │ ◄───────────────────────────── │             │
-└─────────────┘       (3. LPUSH reply)         └─────────────┘
-      │
-      ▼  (4. JSON Response)
-[ HTTP Client ]
-```
-
-1. **`rs-gateway`**: Receives incoming HTTP requests, validates auth/input, assigns a unique `identifier`, and pushes a message to a Redis channel via `LPUSH`.
-2. **`rs-engine`**: Continuously listens using `BRPOP` in a single-threaded async event loop, locks funds upfront, matches orders in an in-memory limit orderbook, updates balance ledgers, and pushes the reply back to the gateway's dedicated response queue.
-3. **Response routing**: `rs-gateway` polls its instance-specific response queue in a background Tokio task and resolves the waiting HTTP handler using an in-memory `tokio::sync::oneshot` channel.
 
 ---
 
@@ -56,18 +101,26 @@ cex-rs/
 
 ### 1. Prerequisites
 * **Rust**: `rustc` / `cargo` (1.80+)
-* **Redis**: Running on `127.0.0.1:6379` (e.g. via Docker `docker run -d -p 6379:6379 redis:7-alpine`)
+* **Docker & Docker Compose**: For local PostgreSQL and Redis
 
-### 2. Run All Services (Single Command)
+### 2. Start Infrastructure Services
+Boot PostgreSQL 16 and Redis 7 in Docker:
+```bash
+docker compose up -d
+```
+* **PostgreSQL**: `localhost:5432` (`cex`, user: `postgres`, password: `postgrespassword`)
+* **Redis**: `localhost:6379`
+
+### 3. Run All Services
 Run both the matching engine and gateway concurrently:
 ```bash
 make dev
 # or
 ./dev.sh
 ```
-Press `Ctrl+C` to gracefully terminate all services.
+The gateway starts on `http://127.0.0.1:3000`.
 
-### 3. Run Services Individually
+### 4. Run Services Individually
 Terminal 1 (Matching Engine):
 ```bash
 cargo run -p rs-engine
@@ -77,25 +130,26 @@ Terminal 2 (HTTP Gateway):
 ```bash
 cargo run -p rs-gateway
 ```
-The gateway starts on `http://127.0.0.1:3000`.
 
 ---
 
 ## 🧪 Testing
 
-### Unit Tests (Matching Engine)
-Verifies orderbook price-time priority, partial fills, FIFO ordering, and order cancellations:
+The repository features 100% pure Rust unit and integration tests (zero external Node.js dependencies):
+
 ```bash
-cargo test -p rs-engine
+cargo test --workspace
 ```
 
-### End-to-End Integration Tests
-Run the test suite against the running Rust servers:
-```bash
-cd /home/pratik/projects/ts-rs-cex/ts-cex
-bun test
-```
-Result: **25 pass, 0 fail (172 assertions in ~360ms)**.
+### Test Coverage Highlights:
+- **`rs-engine` (17 unit tests)**: Price-time priority, FIFO queue order at same price, partial fills, cancellations, state serialization roundtrip.
+- **`rs-gateway` (9 unit tests)**: Argon2id password hashing and constant-time verification, DTO validation, Token Bucket rate limiting.
+- **`tests/integration.rs` (5 integration tests)**:
+  - `test_validation_rejects_invalid_signup`: Input validation defense.
+  - `test_unauthorized_endpoints_without_jwt`: JWT authentication protection.
+  - `test_e2e_trading_lifecycle`: Complete trading flow (onramp, order matching, balance locks, order cancellations).
+  - `test_engine_crash_snapshot_and_replay_recovery`: Simulates an abrupt engine process crash, recovers state from PostgreSQL snapshots, replays subsequent Redis Stream WAL events, and validates that balances and orderbook depth are 100% identical.
+  - `test_double_entry_ledger_and_trade_history`: Exercises async execution batching, queries `/trades/my`, `/trades/sol`, and `/ledger`, and verifies mathematical zero-sum double-entry ledger conservation in PostgreSQL (`SUM(amount) == 0`).
 
 ---
 
@@ -103,20 +157,23 @@ Result: **25 pass, 0 fail (172 assertions in ~360ms)**.
 
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| `POST` | `/signup` | Public | Register user & initialize USD/SOL balances |
-| `POST` | `/signin` | Public | Authenticate user & return JWT Bearer token |
-| `GET` | `/balance` | Bearer | Get user's USD and stock balances (available vs locked) |
+| `POST` | `/signup` | Public | Register user & save Argon2id hash in PostgreSQL |
+| `POST` | `/signin` | Public | Authenticate user credentials & return JWT Bearer token |
+| `GET` | `/balance` | Bearer | Get user's available and locked USD and SOL balances |
 | `POST` | `/onramp` | Bearer | Add USD to user's available balance |
 | `POST` | `/deposit/{asset}` | Bearer | Add asset (e.g. `sol`) to user's available balance |
-| `POST` | `/order` | Bearer | Place a limit order (`asset`, `side`, `price`, `qty`) |
-| `DELETE` | `/order/{order_id}` | Bearer | Cancel open resting order & refund locked funds |
-| `GET` | `/orderbook/{asset}` | Public | Get current orderbook depth (sorted bids and asks) |
+| `GET` | `/ledger` | Bearer | Fetch authenticated user's double-entry financial ledger statement |
+| `POST` | `/order` | Bearer | Submit a limit order (`asset`, `side`, `price`, `qty`) |
+| `DELETE` | `/order/{order_id}` | Bearer | Cancel an open resting order & refund locked funds |
 | `GET` | `/orders/open` | Bearer | Fetch open resting orders for the authenticated user |
-| `POST` | `/reset` | Public | Reset engine state & gateway user store (for testing) |
+| `GET` | `/trades/my` | Bearer | Fetch authenticated user's executed trade history |
+| `GET` | `/trades/{asset}` | Public | Fetch recent public market trades (e.g. `/trades/sol`) |
+| `GET` | `/orderbook/{asset}` | Public | Get current orderbook depth (sorted bids and asks) |
+| `POST` | `/reset` | Public | Clear all tables and streams (for automated test suites) |
 
 ---
 
-## 📖 In-Depth Documentation
+## 📖 Further Reading
 
-* [`ROADMAP.md`](./notes/ROADMAP.md): Production hardening, database persistence, and advanced order types.
-* [`notes/`](./notes/): Technical deep-dive on Perpetual Futures (Perps), liquidations, funding rates, and Web3 Perp DEX architectures.
+* [**`ARCHITECTURE.md`**](./ARCHITECTURE.md): Comprehensive architectural specification, matching algorithms, WAL mechanics, and disaster recovery.
+* [**`notes/ROADMAP.md`**](./notes/ROADMAP.md): Engineering roadmap, completed milestones, and upcoming features (Market Orders, WebSockets, Fees).
