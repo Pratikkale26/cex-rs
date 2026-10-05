@@ -1,7 +1,7 @@
 use actix_web::{web, HttpResponse};
 use rs_shared::*;
 use crate::auth::AuthUser;
-use crate::dto::OrderBody;
+use crate::dto::{OrderBody, Validate};
 use crate::redis::send_and_wait;
 use crate::state::AppState;
 
@@ -10,9 +10,9 @@ pub async fn place_order(
     auth: AuthUser,
     body: web::Json<OrderBody>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    if body.asset != "sol" {
+    if let Err(err) = body.validate() {
         return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "message": "Only SOL orders are supported"
+            "message": err
         })));
     }
 

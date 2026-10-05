@@ -1,7 +1,7 @@
 use actix_web::{web, HttpResponse};
 use rs_shared::*;
 use crate::auth::{hash_password, verify_password, Claims, User, JWT_SECRET};
-use crate::dto::{SigninBody, SignupBody};
+use crate::dto::{SigninBody, SignupBody, Validate};
 use crate::redis::send_and_wait;
 use crate::state::AppState;
 
@@ -9,6 +9,13 @@ pub async fn signup(
     state: web::Data<AppState>,
     body: web::Json<SignupBody>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    // 0. Validate input format
+    if let Err(err) = body.validate() {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "message": err
+        })));
+    }
+
     // 1. Check if user already exists
     {
         let users = state.users.lock().await;
@@ -65,6 +72,13 @@ pub async fn signin(
     state: web::Data<AppState>,
     body: web::Json<SigninBody>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    // 0. Validate input format
+    if let Err(err) = body.validate() {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "message": err
+        })));
+    }
+
     // 1. Lookup user in store
     let (user_id, stored_hash) = {
         let users = state.users.lock().await;

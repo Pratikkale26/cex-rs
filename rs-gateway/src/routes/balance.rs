@@ -1,7 +1,7 @@
 use actix_web::{web, HttpResponse};
 use rs_shared::*;
 use crate::auth::AuthUser;
-use crate::dto::{DepositBody, OnrampBody};
+use crate::dto::{DepositBody, OnrampBody, Validate};
 use crate::redis::send_and_wait;
 use crate::state::AppState;
 
@@ -30,6 +30,12 @@ pub async fn onramp(
     auth: AuthUser,
     body: web::Json<OnrampBody>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    if let Err(err) = body.validate() {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "message": err
+        })));
+    }
+
     let identifier = uuid::Uuid::new_v4().to_string();
     let msg = OnrampMsg {
         user_id: auth.0,
@@ -53,6 +59,12 @@ pub async fn deposit(
     path: web::Path<String>,
     body: web::Json<DepositBody>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    if let Err(err) = body.validate() {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "message": err
+        })));
+    }
+
     let asset = path.into_inner();
     let identifier = uuid::Uuid::new_v4().to_string();
     let msg = DepositMsg {
