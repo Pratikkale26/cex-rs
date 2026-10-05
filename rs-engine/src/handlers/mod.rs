@@ -25,6 +25,21 @@ pub(crate) async fn reply<T: serde::Serialize>(
     }
 }
 
+pub(crate) async fn emit_execution(
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
+    event: &ExecutionEvent,
+) {
+    if let Some(publ) = publisher {
+        let json = serde_json::to_string(event).unwrap();
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(STREAM_EXECUTIONS)
+            .arg("*")
+            .arg("data")
+            .arg(&json);
+        let _: Result<String, _> = cmd.query_async(publ).await;
+    }
+}
+
 pub(crate) async fn reply_error(
     publisher:   Option<&mut redis::aio::MultiplexedConnection>,
     queue_id:    &str,

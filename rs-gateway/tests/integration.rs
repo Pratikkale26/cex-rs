@@ -39,6 +39,7 @@ async fn setup_test_env() -> Option<(
     let _ = sqlx::migrate!("./migrations").run(&db_pool).await;
 
     let _listener_handle = rs_gateway::redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
+    let _worker_handle = rs_gateway::ledger::start_execution_worker(client.clone(), db_pool.clone());
     let app_state = web::Data::new(AppState::new(db_pool.clone(), publisher, pending, queue_id));
 
     // Spawn an in-process Matching Engine for the integration test
@@ -470,4 +471,196 @@ async fn test_engine_crash_snapshot_and_replay_recovery() {
 
     new_engine_handle.abort();
 }
+
+#[actix_web::test]
+#[serial]
+async fn test_double_entry_ledger_and_trade_history() {
+    let (app_state, engine_handle, db_pool, _redis_client, _engine_state) = match setup_test_env().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .configure(routes::configure),
+    )
+    .await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Sign up and sign in Alice (buyer)
+    let req = test::TestRequest::post()
+        .uri("/signup")
+        .set_json(serde_json::json!({
+            "username": "ledger_alice",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::post()
+        .uri("/signin")
+        .set_json(serde_json::json!({
+            "username": "ledger_alice",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let alice_login: serde_json::Value = test::read_body_json(resp).await;
+    let alice_token = alice_login["token"].as_str().unwrap();
+
+    // 3. Sign up and sign in Bob (seller)
+    let req = test::TestRequest::post()
+        .uri("/signup")
+        .set_json(serde_json::json!({
+            "username": "ledger_bob",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::post()
+        .uri("/signin")
+        .set_json(serde_json::json!({
+            "username": "ledger_bob",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bob_login: serde_json::Value = test::read_body_json(resp).await;
+    let bob_token = bob_login["token"].as_str().unwrap();
+
+    // 4. Fund Alice: Onramp $1,000 USD
+    let req = test::TestRequest::post()
+        .uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "qty": 1000 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 5. Fund Bob: Onramp $500 USD and Deposit 10 SOL
+    let req = test::TestRequest::post()
+        .uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 500 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::post()
+        .uri("/deposit/sol")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 10 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 6. Alice places Maker Order: Buy 5 SOL @ $100
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "price": 100,
+            "qty": 5
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 7. Bob places Taker Order: Sell 3 SOL @ $100 (matches against Alice)
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "ask",
+            "price": 100,
+            "qty": 3
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 8. Allow cold-path worker to drain executions into PostgreSQL
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 9. Query public market trades: GET /trades/sol
+    let req = test::TestRequest::get().uri("/trades/sol").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let public_trades: serde_json::Value = test::read_body_json(resp).await;
+    let trades = public_trades["trades"].as_array().expect("trades array");
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0]["price"], 100);
+    assert_eq!(trades[0]["qty"], 3);
+    assert_eq!(trades[0]["quoteAmount"], 300);
+
+    // 10. Query Alice's trade history: GET /trades/my
+    let req = test::TestRequest::get()
+        .uri("/trades/my")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let my_trades: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(my_trades["trades"].as_array().unwrap().len(), 1);
+
+    // 11. Query Bob's trade history: GET /trades/my
+    let req = test::TestRequest::get()
+        .uri("/trades/my")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bob_trades: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bob_trades["trades"].as_array().unwrap().len(), 1);
+
+    // 12. Query Alice's financial ledger statement: GET /ledger
+    let req = test::TestRequest::get()
+        .uri("/ledger")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let alice_ledger: serde_json::Value = test::read_body_json(resp).await;
+    let entries = alice_ledger["ledger"].as_array().expect("ledger entries");
+    assert!(entries.len() >= 3, "Alice should have onramp and 2 trade leg entries (USD debit, SOL credit)");
+
+    // 13. Query Bob's financial ledger statement: GET /ledger
+    let req = test::TestRequest::get()
+        .uri("/ledger")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bob_ledger: serde_json::Value = test::read_body_json(resp).await;
+    let entries = bob_ledger["ledger"].as_array().expect("ledger entries");
+    assert!(entries.len() >= 4, "Bob should have onramp, deposit, and 2 trade leg entries");
+
+    // 14. MATHEMATICAL VERIFICATION OF DOUBLE-ENTRY INVARIANT:
+    // Sum of all entries in the ledger table for every currency must be EXACTLY ZERO!
+    let usd_sum: Option<i64> = sqlx::query_scalar("SELECT COALESCE(SUM(amount), 0)::BIGINT FROM ledger_entries WHERE currency = 'USD'")
+        .fetch_one(&db_pool)
+        .await
+        .unwrap();
+    assert_eq!(usd_sum, Some(0), "Total USD ledger sum must be exactly 0 (Double-entry conservation)");
+
+    let sol_sum: Option<i64> = sqlx::query_scalar("SELECT COALESCE(SUM(amount), 0)::BIGINT FROM ledger_entries WHERE currency = 'SOL'")
+        .fetch_one(&db_pool)
+        .await
+        .unwrap();
+    assert_eq!(sol_sum, Some(0), "Total SOL ledger sum must be exactly 0 (Double-entry conservation)");
+
+    engine_handle.abort();
+}
+
 

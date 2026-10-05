@@ -1,3 +1,6 @@
+pub mod history;
+
+pub use history::*;
 use serde::Deserialize;
 
 pub trait Validate {

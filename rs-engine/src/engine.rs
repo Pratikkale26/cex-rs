@@ -240,7 +240,11 @@ pub async fn run_engine_with_db(
                     if let Some(ref pool) = db {
                         let _ = crate::snapshot::truncate_snapshots(pool).await;
                     }
-                    let _: Result<(), _> = redis::cmd("DEL").arg(STREAM_EVENTS).query_async(&mut publisher).await;
+                    let _: Result<(), _> = redis::cmd("DEL")
+                        .arg(STREAM_EVENTS)
+                        .arg(STREAM_EXECUTIONS)
+                        .query_async(&mut publisher)
+                        .await;
                     last_id = "0-0".to_string();
                     events_since_snapshot = 0;
                     continue;

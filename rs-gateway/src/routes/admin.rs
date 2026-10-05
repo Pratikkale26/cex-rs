@@ -6,14 +6,18 @@ use crate::state::AppState;
 pub async fn reset(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    // Truncate users and snapshots tables and reset auto-increment identity
-    sqlx::query("TRUNCATE TABLE users, engine_snapshots RESTART IDENTITY CASCADE")
+    // Truncate users, snapshots, orders, trades, and ledger tables
+    sqlx::query("TRUNCATE TABLE users, engine_snapshots, orders, trades, ledger_entries RESTART IDENTITY CASCADE")
         .execute(&state.db)
         .await
         .map_err(|e| {
             eprintln!("Database error during reset: {e}");
             actix_web::error::ErrorInternalServerError("Database reset failed")
         })?;
+
+    let _ = sqlx::query("UPDATE execution_checkpoints SET last_stream_id = '0-0', updated_at = NOW() WHERE id = 1")
+        .execute(&state.db)
+        .await;
 
     let identifier = uuid::Uuid::new_v4().to_string();
     let msg = ResetMsg {

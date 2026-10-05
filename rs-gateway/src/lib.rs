@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod dto;
+pub mod ledger;
 pub mod rate_limit;
 pub mod redis;
 pub mod routes;

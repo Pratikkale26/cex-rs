@@ -1,6 +1,6 @@
 use rs_shared::*;
 use crate::state::EngineState;
-use super::reply;
+use super::{emit_execution, reply};
 
 pub async fn handle_signup(
     state:     &mut EngineState,
@@ -20,13 +20,20 @@ pub async fn handle_signup(
 
 pub async fn handle_onramp(
     state:     &mut EngineState,
-    publisher: Option<&mut redis::aio::MultiplexedConnection>,
+    mut publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OnrampMsg,
 ) {
     state.usd_mut(msg.user_id).available += msg.qty;
 
     let usd   = state.usd_balance.get(&msg.user_id).cloned().unwrap_or_default();
     let stock = state.stock_balance.get(&msg.user_id).cloned().unwrap_or_default();
+
+    emit_execution(publisher.as_deref_mut(), &ExecutionEvent::FundingExecuted {
+        user_id:        msg.user_id,
+        currency:       "USD".to_string(),
+        amount:         msg.qty,
+        operation_type: "onramp".to_string(),
+    }).await;
 
     reply(publisher, &msg.queue_id, &BalanceReply {
         identifier:    msg.identifier,
@@ -37,7 +44,7 @@ pub async fn handle_onramp(
 
 pub async fn handle_deposit(
     state:     &mut EngineState,
-    publisher: Option<&mut redis::aio::MultiplexedConnection>,
+    mut publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       DepositMsg,
 ) {
     let symbol_balance = state.stock_balance
@@ -50,6 +57,13 @@ pub async fn handle_deposit(
 
     let usd   = state.usd_balance.get(&msg.user_id).cloned().unwrap_or_default();
     let stock = state.stock_balance.get(&msg.user_id).cloned().unwrap_or_default();
+
+    emit_execution(publisher.as_deref_mut(), &ExecutionEvent::FundingExecuted {
+        user_id:        msg.user_id,
+        currency:       msg.symbol.to_uppercase(),
+        amount:         msg.qty,
+        operation_type: "deposit".to_string(),
+    }).await;
 
     reply(publisher, &msg.queue_id, &BalanceReply {
         identifier:    msg.identifier,

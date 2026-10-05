@@ -52,6 +52,9 @@ async fn main() -> std::io::Result<()> {
     // Spawn response queue listener background task
     let listener_handle = redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
 
+    // Spawn cold-path execution batch worker
+    let worker_handle = ledger::start_execution_worker(client.clone(), db_pool.clone());
+
     let app_state = web::Data::new(AppState::new(db_pool, publisher, pending, queue_id));
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -87,6 +90,7 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    worker_handle.abort();
     listener_handle.abort();
     println!("rs-gateway: Shutdown complete.");
     Ok(())

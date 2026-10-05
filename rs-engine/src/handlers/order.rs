@@ -1,11 +1,11 @@
 use rs_shared::*;
 use crate::orderbook::{MatchResult, OrderbookError, Side, Trade};
 use crate::state::EngineState;
-use super::{reply, reply_cancel_error, reply_error};
+use super::{emit_execution, reply, reply_cancel_error, reply_error};
 
 pub async fn handle_order(
     state:     &mut EngineState,
-    publisher: Option<&mut redis::aio::MultiplexedConnection>,
+    mut publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OrderMsg,
 ) {
     // Only SOL is supported.
@@ -70,20 +70,52 @@ pub async fn handle_order(
 
     // ── Process results ───────────────────────────────────────────────────
 
-    let mut resting_order_id: Option<u64> = None;
+    let mut resting_order: Option<crate::orderbook::OrderAccepted> = None;
 
     for result in results {
         match result {
-            MatchResult::Trade(trade)       => apply_fill(state, &trade),
-            MatchResult::OrderAccepted(acc) => resting_order_id = Some(acc.order_id),
+            MatchResult::Trade(trade) => {
+                apply_fill(state, &trade);
+                let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
+                    .map(|o| o.remaining_qty)
+                    .unwrap_or(0);
+
+                emit_execution(publisher.as_deref_mut(), &ExecutionEvent::TradeExecuted {
+                    maker_order_id:      trade.maker_order_id,
+                    taker_order_id:      trade.taker_order_id,
+                    buyer_id:            trade.buyer,
+                    seller_id:           trade.seller,
+                    market:              "SOL_USD".to_string(),
+                    price:               trade.price,
+                    qty:                 trade.qty,
+                    quote_amount:        trade.price * trade.qty,
+                    maker_remaining_qty: maker_rem,
+                    taker_remaining_qty: 0,
+                }).await;
+            }
+            MatchResult::OrderAccepted(acc) => {
+                resting_order = Some(acc);
+            }
         }
     }
 
-    // ── Reply ─────────────────────────────────────────────────────────────
+    // ── Reply & Record Created Order ──────────────────────────────────────
 
-    let (order_id, status) = match resting_order_id {
-        Some(id) => (Some(id), "open"),
-        None     => (None,     "filled"),
+    let (order_id, status) = match resting_order {
+        Some(acc) => {
+            emit_execution(publisher.as_deref_mut(), &ExecutionEvent::OrderCreated {
+                order_id:      acc.order_id,
+                user_id:       acc.user_id,
+                market:        "SOL_USD".to_string(),
+                side:          msg.side.clone(),
+                price:         acc.price,
+                original_qty:  qty,
+                remaining_qty: acc.remaining_qty,
+                status:        "open".to_string(),
+            }).await;
+            (Some(acc.order_id), "open")
+        }
+        None => (None, "filled"),
     };
 
     reply(publisher, &msg.queue_id, &OrderReply {
@@ -113,7 +145,7 @@ fn apply_fill(state: &mut EngineState, trade: &Trade) {
 
 pub async fn handle_cancel(
     state:     &mut EngineState,
-    publisher: Option<&mut redis::aio::MultiplexedConnection>,
+    mut publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       CancelMsg,
 ) {
     match state.sol_orderbook.cancel_order(msg.order_id, msg.user_id) {
@@ -143,6 +175,12 @@ pub async fn handle_cancel(
                     sol.available += cancelled.remaining_qty;
                 }
             }
+
+            emit_execution(publisher.as_deref_mut(), &ExecutionEvent::OrderCancelled {
+                order_id:      cancelled.order_id,
+                user_id:       cancelled.user_id,
+                remaining_qty: cancelled.remaining_qty,
+            }).await;
 
             reply(publisher, &msg.queue_id, &CancelReply {
                 identifier:    msg.identifier,
