@@ -13,4 +13,9 @@ sqlx       = { version = "0.8", features = ["runtime-tokio", "postgres", "macros
 chrono     = "0.4"
 
 [dev-dependencies]
-proptest = "1"
+proptest  = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "orderbook_bench"
+harness = false

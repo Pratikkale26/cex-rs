@@ -20,6 +20,7 @@ Welcome to the definitive architectural specification and engineering guide for 
 8. [Database Schema & Data Model](#8-database-schema--data-model)
 9. [Request-Response Demuxing (Async over Queue)](#9-request-response-demuxing-async-over-queue)
 10. [Security & Production Hardening](#10-security--production-hardening)
+11. [Performance Benchmarks & Verified Metrics](#11-performance-benchmarks--verified-metrics)
 
 ---
 
@@ -386,3 +387,36 @@ Client HTTP Request
    - Intercepts `SIGINT` / `SIGTERM` on both engine and gateway.
    - Matching engine saves a final snapshot before terminating.
    - Gateway flushes in-flight HTTP connections before closing.
+
+---
+
+## 11. Performance Benchmarks & Verified Metrics
+
+Benchmarking in `cex-rs` is separated into two tiers:
+
+### Tier 1: In-Memory Matching Microbenchmarks (Criterion)
+Executed via `cargo bench -p rs-engine` measuring pure algorithmic throughput:
+
+| Benchmark Operation | Throughput | Latency per Operation | Sample Size |
+|---|---|---|---|
+| **Order Matching (`match_1000_fills`)** | **14.09 million fills / sec** | **70.9 nanoseconds** | 100 samples (50k iterations) |
+| **Resting Ingestion (`place_1000_resting_orders`)** | **9.54 million orders / sec** | **104.7 nanoseconds** | 100 samples (50k iterations) |
+| **Order Cancellation (`cancel_1000_orders`)** | **9.85 million cancels / sec** | **101.5 nanoseconds** | 100 samples (50k iterations) |
+
+### Tier 2: End-to-End Full-Stack Benchmark (Release Mode)
+Executed via `cargo test -p rs-gateway --test benchmark_e2e --release -- --ignored --nocapture`.
+Measures full round-trip: HTTP Client $\to$ Actix Gateway $\to$ Redis Stream `XADD` $\to$ Matching Engine $\to$ Balance Lock $\to$ Redis `LPUSH` $\to$ Gateway Demuxer $\to$ HTTP 201 Created:
+
+| Metric | Result |
+|---|---|
+| **Total Orders Tested** | 1,000 HTTP Limit Orders |
+| **Total Elapsed Time** | 0.977 seconds |
+| **End-to-End Throughput** | **1,023 requests / second** (sequential single client) |
+| **Minimum Latency** | 590 µs (0.59 ms) |
+| **P50 (Median) Latency** | **933 µs (0.93 ms)** |
+| **Average Latency** | **975 µs (0.97 ms)** |
+| **P90 Latency** | 1.22 ms |
+| **P95 Latency** | 1.31 ms |
+| **P99 Latency** | 1.60 ms |
+| **Max Latency** | 10.77 ms |
+

@@ -153,6 +153,24 @@ cargo test --workspace
 
 ---
 
+## ⚡ Performance Benchmarks
+
+### 1. In-Memory Matching Core (Criterion Microbenchmarks)
+Run with `cargo bench -p rs-engine`:
+* **Order Matching (`match_1000_fills`)**: **14.09 million fills / sec** (~70.9 ns / match)
+* **Resting Order Ingestion**: **9.54 million orders / sec** (~104.7 ns / insert)
+* **Order Cancellation**: **9.85 million cancels / sec** (~101.5 ns / cancel)
+
+### 2. End-to-End Full-Stack Throughput & Latency
+Run with `cargo test -p rs-gateway --test benchmark_e2e --release -- --ignored --nocapture`:
+Measures round-trip: HTTP Client $\to$ Actix Gateway $\to$ Redis Stream WAL $\to$ In-Memory Engine $\to$ Balance Lock $\to$ Redis Reply $\to$ Demuxer $\to$ HTTP 201 Created:
+* **Throughput**: **1,023 requests / sec** (single client loop)
+* **P50 (Median) Latency**: **933 µs (0.93 ms)**
+* **Average Latency**: **975 µs (0.97 ms)**
+* **P99 Latency**: **1.60 ms**
+
+---
+
 ## 📡 API Endpoints
 
 | Method | Endpoint | Auth | Description |
