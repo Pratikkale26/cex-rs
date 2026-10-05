@@ -9,8 +9,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Helper to initialize test app state connected to local Redis.
-async fn setup_app_state() -> Option<(web::Data<AppState>, tokio::task::JoinHandle<()>)> {
+/// Helper to initialize test environment with app state, engine, db, and redis.
+async fn setup_test_env() -> Option<(
+    web::Data<AppState>,
+    tokio::task::JoinHandle<()>,
+    sqlx::PgPool,
+    ::redis::Client,
+    Arc<Mutex<rs_engine::EngineState>>,
+)> {
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
     let client = ::redis::Client::open(redis_url.as_str()).ok()?;
 
@@ -33,21 +39,28 @@ async fn setup_app_state() -> Option<(web::Data<AppState>, tokio::task::JoinHand
     let _ = sqlx::migrate!("./migrations").run(&db_pool).await;
 
     let _listener_handle = rs_gateway::redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
-    let app_state = web::Data::new(AppState::new(db_pool, publisher, pending, queue_id));
+    let app_state = web::Data::new(AppState::new(db_pool.clone(), publisher, pending, queue_id));
 
     // Spawn an in-process Matching Engine for the integration test
     #[allow(deprecated)]
     let engine_listener = client.get_async_connection().await.ok()?;
     let engine_publisher = client.get_multiplexed_async_connection().await.ok()?;
     let engine_state = Arc::new(Mutex::new(rs_engine::EngineState::new()));
+    let db_clone = db_pool.clone();
+    let engine_state_clone = Arc::clone(&engine_state);
     let engine_handle = tokio::spawn(async move {
-        rs_engine::run_engine(engine_state, engine_listener, engine_publisher).await;
+        rs_engine::run_engine_with_db(engine_state_clone, engine_listener, engine_publisher, Some(db_clone), "0-0".to_string()).await;
     });
 
     // Give engine a brief moment to connect
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    Some((app_state, engine_handle))
+    Some((app_state, engine_handle, db_pool, client, engine_state))
+}
+
+/// Helper to initialize test app state connected to local Redis.
+async fn setup_app_state() -> Option<(web::Data<AppState>, tokio::task::JoinHandle<()>)> {
+    setup_test_env().await.map(|(state, handle, _, _, _)| (state, handle))
 }
 
 #[actix_web::test]
@@ -275,3 +288,186 @@ async fn test_e2e_trading_lifecycle() {
 
     engine_handle.abort();
 }
+
+#[actix_web::test]
+#[serial]
+async fn test_engine_crash_snapshot_and_replay_recovery() {
+    let (app_state, engine_handle, db_pool, redis_client, engine_state) = match setup_test_env().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .configure(routes::configure),
+    )
+    .await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Sign up and login
+    let signup_body = serde_json::json!({
+        "username": "recovery_user",
+        "email": "recovery@test.com",
+        "password": "Password123!"
+    });
+    let req = test::TestRequest::post().uri("/signup").set_json(&signup_body).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let login_body = serde_json::json!({
+        "username": "recovery_user",
+        "password": "Password123!"
+    });
+    let req = test::TestRequest::post().uri("/signin").set_json(&login_body).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let login_resp: serde_json::Value = test::read_body_json(resp).await;
+    let token = login_resp["token"].as_str().unwrap();
+
+    // 3. Onramp $1,000 USD
+    let req = test::TestRequest::post()
+        .uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({ "qty": 1000 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 4. Place Order #1: Buy 2 SOL @ $100
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "price": 100,
+            "qty": 2
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 5. Take an explicit snapshot of the current state at the latest Redis stream ID
+    let mut conn = redis_client.get_multiplexed_async_connection().await.unwrap();
+    let xrev: Vec<(String, HashMap<String, String>)> = ::redis::cmd("XREVRANGE")
+        .arg(rs_shared::STREAM_EVENTS)
+        .arg("+")
+        .arg("-")
+        .arg("COUNT")
+        .arg(1)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(!xrev.is_empty(), "Stream should contain events from onramp and order 1");
+    let snapshot_stream_id = xrev[0].0.clone();
+
+    {
+        let locked_state = engine_state.lock().await;
+        rs_engine::snapshot::save_snapshot(&db_pool, &snapshot_stream_id, &locked_state)
+            .await
+            .expect("Failed to save snapshot to postgres");
+    }
+
+    // 6. Place Order #2: Buy 3 SOL @ $90 (occurs AFTER the snapshot in the WAL stream)
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "price": 90,
+            "qty": 3
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 7. Verify balance before crash: locked $470 (2*100 + 3*90), available $530
+    let req = test::TestRequest::get()
+        .uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["usdBalance"]["available"], 530);
+    assert_eq!(bal["usdBalance"]["locked"], 470);
+
+    // 8. SIMULATE ENGINE CRASH: abruptly abort the background task
+    engine_handle.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // 9. RECOVERY: Spin up a brand new matching engine instance with empty state
+    // It must load the snapshot (Order #1) and replay the WAL events (Order #2)
+    let recovered_state = Arc::new(Mutex::new(rs_engine::EngineState::new()));
+    #[allow(deprecated)]
+    let new_engine_listener = redis_client.get_async_connection().await.unwrap();
+    let new_engine_publisher = redis_client.get_multiplexed_async_connection().await.unwrap();
+    let db_clone = db_pool.clone();
+    let recovered_state_clone = Arc::clone(&recovered_state);
+    let new_engine_handle = tokio::spawn(async move {
+        rs_engine::run_engine_with_db(
+            recovered_state_clone,
+            new_engine_listener,
+            new_engine_publisher,
+            Some(db_clone),
+            "0-0".to_string(),
+        )
+        .await;
+    });
+
+    // Wait for recovery replay to finish and engine to start listening for live events
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // 10. VERIFY STATE RECOVERY VIA GATEWAY
+    // The recovered engine should accurately report balances and orderbook depth
+    let req = test::TestRequest::get()
+        .uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["usdBalance"]["available"], 530);
+    assert_eq!(bal["usdBalance"]["locked"], 470);
+
+    let req = test::TestRequest::get().uri("/orderbook/sol").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ob: serde_json::Value = test::read_body_json(resp).await;
+    let bids = ob["orderbook"]["bids"].as_array().unwrap();
+    assert_eq!(bids.len(), 2);
+    assert_eq!(bids[0]["price"], 100);
+    assert_eq!(bids[0]["qty"], 2);
+    assert_eq!(bids[1]["price"], 90);
+    assert_eq!(bids[1]["qty"], 3);
+
+    // 11. SUBMIT LIVE ORDER TO RECOVERED ENGINE: Buy 1 SOL @ $80
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "price": 80,
+            "qty": 1
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let req = test::TestRequest::get()
+        .uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["usdBalance"]["available"], 450);
+    assert_eq!(bal["usdBalance"]["locked"], 550);
+
+    new_engine_handle.abort();
+}
+

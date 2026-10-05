@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use actix_web::web;
-use redis::AsyncCommands;
 use tokio::sync::{oneshot, Mutex};
 use crate::state::AppState;
 
@@ -59,7 +58,13 @@ pub async fn send_and_wait<T: serde::de::DeserializeOwned, M: serde::Serialize>(
 
     {
         let mut publisher = state.redis_publisher.lock().await;
-        let _: () = publisher.lpush(channel, json_str).await
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(rs_shared::STREAM_EVENTS)
+            .arg("*")
+            .arg("channel").arg(channel)
+            .arg("data").arg(&json_str);
+
+        let _: String = cmd.query_async(&mut *publisher).await
             .map_err(actix_web::error::ErrorInternalServerError)?;
     }
 

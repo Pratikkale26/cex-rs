@@ -14,17 +14,19 @@ use rs_shared::*;
 // ── Common reply helpers ────────────────────────────────────────────────────
 
 pub(crate) async fn reply<T: serde::Serialize>(
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     queue_id:  &str,
     payload:   &T,
 ) {
-    let channel = format!("{}{}", REPLY_PREFIX, queue_id);
-    let json    = serde_json::to_string(payload).unwrap();
-    let _: ()   = publisher.lpush(channel, json).await.unwrap();
+    if let Some(publ) = publisher {
+        let channel = format!("{}{}", REPLY_PREFIX, queue_id);
+        let json    = serde_json::to_string(payload).unwrap();
+        let _: ()   = publ.lpush(channel, json).await.unwrap();
+    }
 }
 
 pub(crate) async fn reply_error(
-    publisher:   &mut redis::aio::MultiplexedConnection,
+    publisher:   Option<&mut redis::aio::MultiplexedConnection>,
     queue_id:    &str,
     identifier:  &str,
     error:       &str,
@@ -40,7 +42,7 @@ pub(crate) async fn reply_error(
 }
 
 pub(crate) async fn reply_cancel_error(
-    publisher:  &mut redis::aio::MultiplexedConnection,
+    publisher:  Option<&mut redis::aio::MultiplexedConnection>,
     queue_id:   &str,
     identifier: &str,
     error:      &str,

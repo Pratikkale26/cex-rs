@@ -13,13 +13,28 @@ use rs_engine::engine;
 
 #[tokio::main]
 async fn main() {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgrespassword@127.0.0.1:5432/cex".to_string());
+
+    let db_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .ok();
+
+    if db_pool.is_some() {
+        println!("rs-engine: connected to PostgreSQL (snapshots enabled).");
+    } else {
+        println!("rs-engine: running in memory-only mode (PostgreSQL not connected).");
+    }
+
     let redis_url = std::env::var("REDIS_URL")
         .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
     let client = redis::Client::open(redis_url.as_str())
         .expect("Invalid Redis URL");
 
-    // Dedicated connection for blocking brpop.
+    // Dedicated connection for blocking stream read.
     #[allow(deprecated)]
     let listener = client
         .get_async_connection()
@@ -34,6 +49,6 @@ async fn main() {
 
     let state = Arc::new(Mutex::new(EngineState::new()));
 
-    println!("rs-engine: connected to Redis, listening...");
-    engine::run_engine(state, listener, publisher).await;
+    println!("rs-engine: connected to Redis, listening on streams...");
+    engine::run_engine_with_db(state, listener, publisher, db_pool, "0-0".to_string()).await;
 }

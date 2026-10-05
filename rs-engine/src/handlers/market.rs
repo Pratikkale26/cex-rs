@@ -4,7 +4,7 @@ use super::reply;
 
 pub async fn handle_get_orderbook(
     state:     &EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OrderbookQueryMsg,
 ) {
     if msg.asset != "sol" {

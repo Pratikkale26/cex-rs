@@ -6,8 +6,8 @@ use crate::state::AppState;
 pub async fn reset(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    // Truncate users table and reset auto-increment identity
-    sqlx::query("TRUNCATE TABLE users RESTART IDENTITY CASCADE")
+    // Truncate users and snapshots tables and reset auto-increment identity
+    sqlx::query("TRUNCATE TABLE users, engine_snapshots RESTART IDENTITY CASCADE")
         .execute(&state.db)
         .await
         .map_err(|e| {

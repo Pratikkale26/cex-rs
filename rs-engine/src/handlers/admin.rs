@@ -4,7 +4,7 @@ use super::reply;
 
 pub async fn handle_reset(
     state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       ResetMsg,
 ) {
     state.reset();

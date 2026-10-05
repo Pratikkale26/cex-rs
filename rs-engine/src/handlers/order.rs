@@ -5,7 +5,7 @@ use super::{reply, reply_cancel_error, reply_error};
 
 pub async fn handle_order(
     state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OrderMsg,
 ) {
     // Only SOL is supported.
@@ -113,7 +113,7 @@ fn apply_fill(state: &mut EngineState, trade: &Trade) {
 
 pub async fn handle_cancel(
     state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       CancelMsg,
 ) {
     match state.sol_orderbook.cancel_order(msg.order_id, msg.user_id) {
@@ -157,7 +157,7 @@ pub async fn handle_cancel(
 
 pub async fn handle_get_open_orders(
     state:     &EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OpenOrdersQueryMsg,
 ) {
     let orders = state.sol_orderbook

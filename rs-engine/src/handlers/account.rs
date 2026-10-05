@@ -4,7 +4,7 @@ use super::reply;
 
 pub async fn handle_signup(
     state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       SignupMsg,
 ) {
     // Initialise zero balances for the new user.
@@ -20,7 +20,7 @@ pub async fn handle_signup(
 
 pub async fn handle_onramp(
     state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OnrampMsg,
 ) {
     state.usd_mut(msg.user_id).available += msg.qty;
@@ -37,7 +37,7 @@ pub async fn handle_onramp(
 
 pub async fn handle_deposit(
     state:     &mut EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       DepositMsg,
 ) {
     let symbol_balance = state.stock_balance
@@ -60,7 +60,7 @@ pub async fn handle_deposit(
 
 pub async fn handle_balance(
     state:     &EngineState,
-    publisher: &mut redis::aio::MultiplexedConnection,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       BalanceQueryMsg,
 ) {
     let usd   = state.usd_balance.get(&msg.user_id).cloned().unwrap_or_default();
