@@ -6,8 +6,8 @@ use crate::state::AppState;
 pub async fn reset(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    // Truncate users, snapshots, orders, trades, and ledger tables
-    sqlx::query("TRUNCATE TABLE users, engine_snapshots, orders, trades, ledger_entries RESTART IDENTITY CASCADE")
+    // Clear tables cleanly using raw_sql
+    sqlx::raw_sql("TRUNCATE TABLE users, engine_snapshots, orders, trades, ledger_entries RESTART IDENTITY CASCADE")
         .execute(&state.db)
         .await
         .map_err(|e| {

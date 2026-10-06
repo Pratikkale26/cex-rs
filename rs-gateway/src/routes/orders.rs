@@ -16,11 +16,17 @@ pub async fn place_order(
         })));
     }
 
+    let order_type = match body.order_type.to_lowercase().as_str() {
+        "market" => OrderType::Market,
+        _ => OrderType::Limit
+    };
+
     let identifier = uuid::Uuid::new_v4().to_string();
     let msg = OrderMsg {
         user_id: auth.0,
         asset: body.asset.clone(),
         side: body.side.clone(),
+        order_type,
         price: body.price,
         qty: body.qty,
         queue_id: state.queue_id.clone(),

@@ -24,11 +24,21 @@ pub struct DepositMsg {
     pub identifier: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OrderType {
+    #[default]
+    Limit,
+    Market,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct OrderMsg {
     pub user_id:    u64,
     pub asset:      String,
     pub side:       String, // "bid" | "ask"
+    #[serde(default)] // it will make Limit as default if missing
+    pub order_type:   OrderType, // "limit" | "market"
     pub price:      i64,
     pub qty:        i64,
     pub queue_id:   String,

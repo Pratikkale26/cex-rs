@@ -255,3 +255,83 @@ fn get_user_orders_remaining_qty_after_partial_fill() {
     assert_eq!(orders.len(), 1);
     assert_eq!(orders[0].remaining_qty, 6);
 }
+
+#[test]
+fn test_market_buy_sweeps_multiple_levels_no_resting() {
+    let mut b = book();
+    // Setup asks: 5 SOL @ 100, 5 SOL @ 110
+    b.add_order(1, Side::Ask, 100, 5).unwrap();
+    b.add_order(2, Side::Ask, 110, 5).unwrap();
+
+    // Market buy 7 SOL (takes 5 @ 100, 2 @ 110)
+    let results = b.execute_market_order(3, Side::Bid, 7).unwrap();
+    assert_eq!(results.len(), 2);
+
+    match &results[0] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 100);
+            assert_eq!(t.qty, 5);
+            assert_eq!(t.buyer, 3);
+            assert_eq!(t.seller, 1);
+        }
+        _ => panic!("expected trade"),
+    }
+    match &results[1] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 110);
+            assert_eq!(t.qty, 2);
+            assert_eq!(t.buyer, 3);
+            assert_eq!(t.seller, 2);
+        }
+        _ => panic!("expected trade"),
+    }
+
+    // Remaining on book: 3 SOL @ 110
+    assert_eq!(b.best_ask(), Some(110));
+    let snap = b.get_state();
+    assert_eq!(snap.asks[0].qty, 3);
+    // Market order NEVER rests in bids
+    assert_eq!(b.best_bid(), None);
+    assert_eq!(b.get_user_orders(3).len(), 0);
+}
+
+#[test]
+fn test_market_order_partial_fill_remainder_killed() {
+    let mut b = book();
+    // Only 4 SOL available in bids @ 95
+    b.add_order(1, Side::Bid, 95, 4).unwrap();
+
+    // Market sell 10 SOL: fills 4, kills 6
+    let results = b.execute_market_order(2, Side::Ask, 10).unwrap();
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 95);
+            assert_eq!(t.qty, 4);
+        }
+        _ => panic!("expected trade"),
+    }
+
+    // Book is now completely empty
+    assert_eq!(b.best_bid(), None);
+    assert_eq!(b.best_ask(), None);
+    // Seller has NO resting order
+    assert_eq!(b.get_user_orders(2).len(), 0);
+}
+
+#[test]
+fn test_quote_cost_for_market_buy_calculation() {
+    let mut b = book();
+    b.add_order(1, Side::Ask, 100, 5).unwrap();
+    b.add_order(2, Side::Ask, 110, 5).unwrap();
+
+    // 7 SOL: 5*100 + 2*110 = 500 + 220 = 720 USD, fillable: 7
+    let (cost, fillable) = b.quote_cost_for_market_buy(7);
+    assert_eq!(cost, 720);
+    assert_eq!(fillable, 7);
+
+    // 15 SOL (more than total depth 10): 5*100 + 5*110 = 1050 USD, fillable: 10
+    let (cost_over, fillable_over) = b.quote_cost_for_market_buy(15);
+    assert_eq!(cost_over, 1050);
+    assert_eq!(fillable_over, 10);
+}

@@ -77,10 +77,17 @@ impl Validate for DepositBody {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct OrderBody {
-    pub asset: String,
-    pub side:  String, // "bid" | "ask"
-    pub price: i64,
-    pub qty:   i64,
+    pub asset:      String,
+    pub side:       String, // "bid" | "ask"
+    #[serde(default = "default_order_type")]
+    pub order_type: String,
+    #[serde(default)]
+    pub price:      i64,
+    pub qty:        i64,
+}
+
+fn default_order_type() -> String {
+    "limit".to_string()
 }
 
 impl Validate for OrderBody {
@@ -91,7 +98,11 @@ impl Validate for OrderBody {
         if self.side != "bid" && self.side != "ask" {
             return Err("Side must be 'bid' or 'ask'");
         }
-        if self.price <= 0 {
+        let otype = self.order_type.to_lowercase();
+        if otype != "limit" && otype != "market" {
+            return Err("Order type must be 'limit' or 'market'");
+        }
+        if otype == "limit" && self.price <= 0 {
             return Err("Order price must be positive");
         }
         if self.qty <= 0 {
@@ -115,11 +126,14 @@ mod tests {
 
     #[test]
     fn test_order_validation() {
-        assert!(OrderBody { asset: "sol".into(), side: "bid".into(), price: 100, qty: 10 }.validate().is_ok());
-        assert!(OrderBody { asset: "btc".into(), side: "bid".into(), price: 100, qty: 10 }.validate().is_err());
-        assert!(OrderBody { asset: "sol".into(), side: "hold".into(), price: 100, qty: 10 }.validate().is_err());
-        assert!(OrderBody { asset: "sol".into(), side: "bid".into(), price: 0, qty: 10 }.validate().is_err());
-        assert!(OrderBody { asset: "sol".into(), side: "bid".into(), price: 100, qty: 0 }.validate().is_err());
+        assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10 }.validate().is_ok());
+        assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "market".into(), price: 0, qty: 10 }.validate().is_ok());
+        assert!(OrderBody { asset: "sol".into(), side: "ask".into(), order_type: "market".into(), price: 0, qty: 10 }.validate().is_ok());
+        assert!(OrderBody { asset: "btc".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10 }.validate().is_err());
+        assert!(OrderBody { asset: "sol".into(), side: "hold".into(), order_type: "limit".into(), price: 100, qty: 10 }.validate().is_err());
+        assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "invalid".into(), price: 100, qty: 10 }.validate().is_err());
+        assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "limit".into(), price: 0, qty: 10 }.validate().is_err());
+        assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 0 }.validate().is_err());
     }
 
     #[test]

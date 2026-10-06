@@ -133,8 +133,8 @@ async fn test_unauthorized_endpoints_without_jwt() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-#[actix_web::test]
 #[serial]
+#[actix_web::test]
 async fn test_e2e_trading_lifecycle() {
     let (app_state, engine_handle) = match setup_app_state().await {
         Some(res) => res,
@@ -290,8 +290,8 @@ async fn test_e2e_trading_lifecycle() {
     engine_handle.abort();
 }
 
-#[actix_web::test]
 #[serial]
+#[actix_web::test]
 async fn test_engine_crash_snapshot_and_replay_recovery() {
     let (app_state, engine_handle, db_pool, redis_client, engine_state) = match setup_test_env().await {
         Some(res) => res,
@@ -472,8 +472,8 @@ async fn test_engine_crash_snapshot_and_replay_recovery() {
     new_engine_handle.abort();
 }
 
-#[actix_web::test]
 #[serial]
+#[actix_web::test]
 async fn test_double_entry_ledger_and_trade_history() {
     let (app_state, engine_handle, db_pool, _redis_client, _engine_state) = match setup_test_env().await {
         Some(res) => res,
@@ -662,5 +662,180 @@ async fn test_double_entry_ledger_and_trade_history() {
 
     engine_handle.abort();
 }
+
+#[serial]
+#[actix_web::test]
+async fn test_market_order_e2e_lifecycle() {
+    let (app_state, engine_handle) = match setup_app_state().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .wrap(rate_limit::RateLimitMiddleware::default())
+            .configure(routes::configure)
+    ).await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Signup Alice
+    let req = test::TestRequest::post()
+        .uri("/signup")
+        .set_json(serde_json::json!({ "username": "alice_market", "password": "Password@123" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::post()
+        .uri("/signin")
+        .set_json(serde_json::json!({ "username": "alice_market", "password": "Password@123" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let alice_token = body["token"].as_str().unwrap().to_string();
+
+    // 3. Signup Bob
+    let req = test::TestRequest::post()
+        .uri("/signup")
+        .set_json(serde_json::json!({ "username": "bob_market", "password": "Password@123" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::post()
+        .uri("/signin")
+        .set_json(serde_json::json!({ "username": "bob_market", "password": "Password@123" }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let bob_token = body["token"].as_str().unwrap().to_string();
+
+    // 4. Alice deposits 10 SOL
+    let req = test::TestRequest::post()
+        .uri("/deposit/sol")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "qty": 10 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 5. Bob onramps 1000 USD
+    let req = test::TestRequest::post()
+        .uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 1000 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 6. Alice posts 2 limit asks: 5 SOL @ $100, 5 SOL @ $110
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "asset": "sol", "side": "ask", "price": 100, "qty": 5 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "asset": "sol", "side": "ask", "price": 110, "qty": 5 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 7. Bob places a Market Buy for 7 SOL (sweeps 5 @ 100, 2 @ 110 = $720 total)
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "order_type": "market",
+            "qty": 7
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let order_resp: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(order_resp["status"], "filled");
+    assert!(order_resp["orderId"].is_null(), "Market order never rests on the book");
+
+    // 8. Verify Bob's balances: 7 SOL available, $280 USD available, 0 locked
+    let req = test::TestRequest::get()
+        .uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["stockBalance"]["sol"]["available"], 7);
+    assert_eq!(bal["stockBalance"]["sol"]["locked"], 0);
+    assert_eq!(bal["usdBalance"]["available"], 280);
+    assert_eq!(bal["usdBalance"]["locked"], 0);
+
+    // 9. Verify Alice's balances: 3 SOL locked (in remaining ask), $720 USD available
+    let req = test::TestRequest::get()
+        .uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["stockBalance"]["sol"]["available"], 0);
+    assert_eq!(bal["stockBalance"]["sol"]["locked"], 3);
+    assert_eq!(bal["usdBalance"]["available"], 720);
+
+    // 10. Verify Orderbook: remaining ask is 3 SOL @ 110, bids are empty
+    let req = test::TestRequest::get().uri("/orderbook/sol").to_request();
+    let resp = test::call_service(&app, req).await;
+    let ob: serde_json::Value = test::read_body_json(resp).await;
+    let asks = ob["orderbook"]["asks"].as_array().unwrap();
+    assert_eq!(asks.len(), 1);
+    assert_eq!(asks[0]["price"], 110);
+    assert_eq!(asks[0]["qty"], 3);
+    let bids = ob["orderbook"]["bids"].as_array().unwrap();
+    assert_eq!(bids.len(), 0);
+
+    // 11. Bob places Market Sell for 5 SOL when there are NO bids in the book
+    // It should fill 0, refund all 5 SOL back to available, and return "unfilled"
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "ask",
+            "order_type": "market",
+            "qty": 5
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let order_resp: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(order_resp["status"], "unfilled");
+
+    // Verify Bob's SOL was fully refunded: still 7 SOL available, 0 locked
+    let req = test::TestRequest::get()
+        .uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["stockBalance"]["sol"]["available"], 7);
+    assert_eq!(bal["stockBalance"]["sol"]["locked"], 0);
+
+    // Allow cold-path worker to drain executions before finishing test
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    engine_handle.abort();
+}
+
 
 

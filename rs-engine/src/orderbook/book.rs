@@ -247,6 +247,132 @@ impl Orderbook {
         Ok(results)
     }
 
+    /// Calculate the total quote currency (USD) needed to buy `qty` from current asks.
+    /// Returns (total_cost, fillable_qty).
+    pub fn quote_cost_for_market_buy(&self, mut qty: Quantity) -> (u64, Quantity) {
+        let mut total_cost = 0_u64;
+        let mut fillable_qty = 0_u64;
+        for (&price, level) in &self.asks {
+            for &order_id in &level.orders {
+                if let Some(order) = self.orders.get(&order_id) {
+                    let take = qty.min(order.remaining_qty);
+                    total_cost += take * price;
+                    fillable_qty += take;
+                    qty -= take;
+                    if qty == 0 {
+                        return (total_cost, fillable_qty);
+                    }
+                }
+            }
+        }
+        (total_cost, fillable_qty)
+    }
+
+    /// Execute a market order immediately against opposite book depth.
+    /// Any unfilled quantity is discarded (IOC / never rests on the book).
+    pub fn execute_market_order(
+        &mut self,
+        user_id: UserId,
+        side:    Side,
+        qty:     Quantity,
+    ) -> Result<Vec<MatchResult>, OrderbookError> {
+        if qty == 0 { return Err(OrderbookError::InvalidQuantity); }
+
+        let order_id       = self.next_order_id;
+        self.next_order_id += 1;
+
+        let mut remaining_qty = qty;
+        let mut results       = Vec::new();
+
+        while remaining_qty > 0 {
+            let resting_price = match side {
+                Side::Bid => self.best_ask(),
+                Side::Ask => self.best_bid(),
+            };
+            let resting_price = match resting_price {
+                Some(p) => p,
+                None    => break, // No more liquidity available on opposite side
+            };
+
+            loop {
+                if remaining_qty == 0 { break; }
+
+                let maker_id = {
+                    let levels = match side {
+                        Side::Bid => &self.asks,
+                        Side::Ask => &self.bids,
+                    };
+                    match levels.get(&resting_price).and_then(|l| l.orders.front()) {
+                        Some(&id) => id,
+                        None      => break,
+                    }
+                };
+
+                let maker = self.orders.get_mut(&maker_id)
+                    .expect("order in price level must exist in map");
+
+                let fill_qty       = remaining_qty.min(maker.remaining_qty);
+                let maker_user_id  = maker.user_id;
+                maker.remaining_qty -= fill_qty;
+                remaining_qty       -= fill_qty;
+
+                let trade = match side {
+                    Side::Bid => Trade {
+                        buyer:          user_id,
+                        seller:         maker_user_id,
+                        price:          resting_price,
+                        qty:            fill_qty,
+                        taker_order_id: order_id,
+                        maker_order_id: maker_id,
+                    },
+                    Side::Ask => Trade {
+                        buyer:          maker_user_id,
+                        seller:         user_id,
+                        price:          resting_price,
+                        qty:            fill_qty,
+                        taker_order_id: order_id,
+                        maker_order_id: maker_id,
+                    },
+                };
+                results.push(MatchResult::Trade(trade));
+
+                let maker_done = self.orders.get(&maker_id)
+                    .map(|o| o.remaining_qty == 0)
+                    .unwrap_or(false);
+
+                if maker_done {
+                    self.orders.remove(&maker_id);
+
+                    let level_empty = {
+                        let levels = match side {
+                            Side::Bid => &mut self.asks,
+                            Side::Ask => &mut self.bids,
+                        };
+                        let level = levels.get_mut(&resting_price)
+                            .expect("price level must exist");
+                        let front = level.orders.pop_front()
+                            .expect("maker order must be in FIFO queue");
+                        debug_assert_eq!(front, maker_id);
+                        level.is_empty()
+                    };
+
+                    if level_empty {
+                        match side {
+                            Side::Bid => { self.asks.remove(&resting_price); }
+                            Side::Ask => { self.bids.remove(&resting_price); }
+                        }
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Market order NEVER rests in the book.
+        Ok(results)
+    }
+
     pub fn cancel_order(
         &mut self,
         order_id: OrderId,

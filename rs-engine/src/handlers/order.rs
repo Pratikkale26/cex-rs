@@ -25,106 +25,249 @@ pub async fn handle_order(
         }
     };
 
-    // Validate price / qty BEFORE locking funds.
-    if msg.price <= 0 || msg.qty <= 0 {
+    // Validate qty.
+    if msg.qty <= 0 {
         reply_error(publisher, &msg.queue_id, &msg.identifier,
-                    "price and qty must be positive numbers", 500).await;
+                    "qty must be a positive number", 400).await;
         return;
     }
-
-    let price = msg.price as u64;
     let qty = msg.qty as u64;
-    let cost = price * qty;
 
-    // ── Lock funds upfront ────────────────────────────────────────────────
-    // Both taker and maker go through this path, so fills can always
-    // deduct from `locked` (not `available`).
-
-    match side {
-        Side::Bid => {
-            let usd = state.usd_mut(msg.user_id);
-            if usd.available < cost {
+    match msg.order_type {
+        OrderType::Limit => {
+            if msg.price <= 0 {
                 reply_error(publisher, &msg.queue_id, &msg.identifier,
-                            "Insufficient USD", 400).await;
+                            "price must be positive for limit orders", 400).await;
                 return;
             }
-            usd.available -= cost;
-            usd.locked    += cost;
-        }
-        Side::Ask => {
-            let sol = state.sol_mut(msg.user_id);
-            if sol.available < qty {
-                reply_error(publisher, &msg.queue_id, &msg.identifier,
-                            "Insufficient SOL", 400).await;
-                return;
+            let price = msg.price as u64;
+            let cost = price * qty;
+
+            // ── Lock funds upfront ────────────────────────────────────────
+            match side {
+                Side::Bid => {
+                    let usd = state.usd_mut(msg.user_id);
+                    if usd.available < cost {
+                        reply_error(publisher, &msg.queue_id, &msg.identifier,
+                                    "Insufficient USD", 400).await;
+                        return;
+                    }
+                    usd.available -= cost;
+                    usd.locked    += cost;
+                }
+                Side::Ask => {
+                    let sol = state.sol_mut(msg.user_id);
+                    if sol.available < qty {
+                        reply_error(publisher, &msg.queue_id, &msg.identifier,
+                                    "Insufficient SOL", 400).await;
+                        return;
+                    }
+                    sol.available -= qty;
+                    sol.locked    += qty;
+                }
             }
-            sol.available -= qty;
-            sol.locked    += qty;
-        }
-    }
 
-    // ── Place order ───────────────────────────────────────────────────────
+            // ── Place limit order ─────────────────────────────────────────
+            let results = state.sol_orderbook.add_order(msg.user_id, side, price, qty)
+                .expect("price/qty already validated above");
 
-    let results = state.sol_orderbook.add_order(msg.user_id, side, price, qty)
-        .expect("price/qty already validated above");
+            let mut resting_order: Option<crate::orderbook::OrderAccepted> = None;
 
-    // ── Process results ───────────────────────────────────────────────────
+            for result in results {
+                match result {
+                    MatchResult::Trade(trade) => {
+                        apply_fill(state, &trade);
+                        let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
+                            .map(|o| o.remaining_qty)
+                            .unwrap_or(0);
 
-    let mut resting_order: Option<crate::orderbook::OrderAccepted> = None;
-
-    for result in results {
-        match result {
-            MatchResult::Trade(trade) => {
-                apply_fill(state, &trade);
-                let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
-                    .map(|o| o.remaining_qty)
-                    .unwrap_or(0);
-
-                emit_execution(publisher.as_deref_mut(), &ExecutionEvent::TradeExecuted {
-                    maker_order_id:      trade.maker_order_id,
-                    taker_order_id:      trade.taker_order_id,
-                    buyer_id:            trade.buyer,
-                    seller_id:           trade.seller,
-                    market:              "SOL_USD".to_string(),
-                    price:               trade.price,
-                    qty:                 trade.qty,
-                    quote_amount:        trade.price * trade.qty,
-                    maker_remaining_qty: maker_rem,
-                    taker_remaining_qty: 0,
-                }).await;
+                        emit_execution(publisher.as_deref_mut(), &ExecutionEvent::TradeExecuted {
+                            maker_order_id:      trade.maker_order_id,
+                            taker_order_id:      trade.taker_order_id,
+                            buyer_id:            trade.buyer,
+                            seller_id:           trade.seller,
+                            market:              "SOL_USD".to_string(),
+                            price:               trade.price,
+                            qty:                 trade.qty,
+                            quote_amount:        trade.price * trade.qty,
+                            maker_remaining_qty: maker_rem,
+                            taker_remaining_qty: 0,
+                        }).await;
+                    }
+                    MatchResult::OrderAccepted(acc) => {
+                        resting_order = Some(acc);
+                    }
+                }
             }
-            MatchResult::OrderAccepted(acc) => {
-                resting_order = Some(acc);
-            }
-        }
-    }
 
-    // ── Reply & Record Created Order ──────────────────────────────────────
+            let (order_id, status) = match resting_order {
+                Some(acc) => {
+                    emit_execution(publisher.as_deref_mut(), &ExecutionEvent::OrderCreated {
+                        order_id:      acc.order_id,
+                        user_id:       acc.user_id,
+                        market:        "SOL_USD".to_string(),
+                        side:          msg.side.clone(),
+                        price:         acc.price,
+                        original_qty:  qty,
+                        remaining_qty: acc.remaining_qty,
+                        status:        "open".to_string(),
+                    }).await;
+                    (Some(acc.order_id), "open")
+                }
+                None => (None, "filled"),
+            };
 
-    let (order_id, status) = match resting_order {
-        Some(acc) => {
-            emit_execution(publisher.as_deref_mut(), &ExecutionEvent::OrderCreated {
-                order_id:      acc.order_id,
-                user_id:       acc.user_id,
-                market:        "SOL_USD".to_string(),
-                side:          msg.side.clone(),
-                price:         acc.price,
-                original_qty:  qty,
-                remaining_qty: acc.remaining_qty,
-                status:        "open".to_string(),
+            reply(publisher, &msg.queue_id, &OrderReply {
+                identifier:  msg.identifier,
+                order_id,
+                status:      Some(status.to_string()),
+                error:       None,
+                status_code: None,
             }).await;
-            (Some(acc.order_id), "open")
         }
-        None => (None, "filled"),
-    };
 
-    reply(publisher, &msg.queue_id, &OrderReply {
-        identifier:  msg.identifier,
-        order_id,
-        status:      Some(status.to_string()),
-        error:       None,
-        status_code: None,
-    }).await;
+        OrderType::Market => {
+            match side {
+                Side::Ask => {
+                    // Market Sell: Lock `qty` SOL upfront.
+                    let sol = state.sol_mut(msg.user_id);
+                    if sol.available < qty {
+                        reply_error(publisher, &msg.queue_id, &msg.identifier,
+                                    "Insufficient SOL", 400).await;
+                        return;
+                    }
+                    sol.available -= qty;
+                    sol.locked    += qty;
+
+                    let results = state.sol_orderbook.execute_market_order(msg.user_id, side, qty)
+                        .expect("qty validated");
+
+                    let mut filled_qty = 0_u64;
+                    for result in results {
+                        if let MatchResult::Trade(trade) = result {
+                            apply_fill(state, &trade);
+                            filled_qty += trade.qty;
+
+                            let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
+                                .map(|o| o.remaining_qty)
+                                .unwrap_or(0);
+
+                            emit_execution(publisher.as_deref_mut(), &ExecutionEvent::TradeExecuted {
+                                maker_order_id:      trade.maker_order_id,
+                                taker_order_id:      trade.taker_order_id,
+                                buyer_id:            trade.buyer,
+                                seller_id:           trade.seller,
+                                market:              "SOL_USD".to_string(),
+                                price:               trade.price,
+                                qty:                 trade.qty,
+                                quote_amount:        trade.price * trade.qty,
+                                maker_remaining_qty: maker_rem,
+                                taker_remaining_qty: 0,
+                            }).await;
+                        }
+                    }
+
+                    // Refund unsold SOL if book liquidity ran out
+                    let unfilled_qty = qty - filled_qty;
+                    if unfilled_qty > 0 {
+                        let sol = state.sol_mut(msg.user_id);
+                        sol.locked    -= unfilled_qty;
+                        sol.available += unfilled_qty;
+                    }
+
+                    let status = if filled_qty == qty {
+                        "filled"
+                    } else if filled_qty > 0 {
+                        "partially_filled"
+                    } else {
+                        "unfilled"
+                    };
+
+                    reply(publisher, &msg.queue_id, &OrderReply {
+                        identifier:  msg.identifier,
+                        order_id:    None,
+                        status:      Some(status.to_string()),
+                        error:       None,
+                        status_code: None,
+                    }).await;
+                }
+
+                Side::Bid => {
+                    // Market Buy: Calculate required USD from available ask liquidity.
+                    let (required_usd, fillable_qty) = state.sol_orderbook.quote_cost_for_market_buy(qty);
+                    if fillable_qty == 0 {
+                        reply_error(publisher, &msg.queue_id, &msg.identifier,
+                                    "No ask liquidity available in orderbook", 400).await;
+                        return;
+                    }
+
+                    let usd = state.usd_mut(msg.user_id);
+                    if usd.available < required_usd {
+                        reply_error(publisher, &msg.queue_id, &msg.identifier,
+                                    "Insufficient USD", 400).await;
+                        return;
+                    }
+                    usd.available -= required_usd;
+                    usd.locked    += required_usd;
+
+                    let results = state.sol_orderbook.execute_market_order(msg.user_id, side, qty)
+                        .expect("qty validated");
+
+                    let mut filled_qty = 0_u64;
+                    let mut total_spent = 0_u64;
+
+                    for result in results {
+                        if let MatchResult::Trade(trade) = result {
+                            apply_fill(state, &trade);
+                            filled_qty  += trade.qty;
+                            total_spent += trade.price * trade.qty;
+
+                            let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
+                                .map(|o| o.remaining_qty)
+                                .unwrap_or(0);
+
+                            emit_execution(publisher.as_deref_mut(), &ExecutionEvent::TradeExecuted {
+                                maker_order_id:      trade.maker_order_id,
+                                taker_order_id:      trade.taker_order_id,
+                                buyer_id:            trade.buyer,
+                                seller_id:           trade.seller,
+                                market:              "SOL_USD".to_string(),
+                                price:               trade.price,
+                                qty:                 trade.qty,
+                                quote_amount:        trade.price * trade.qty,
+                                maker_remaining_qty: maker_rem,
+                                taker_remaining_qty: 0,
+                            }).await;
+                        }
+                    }
+
+                    // Refund unspent USD if any (e.g. partial fill)
+                    let refund = required_usd.saturating_sub(total_spent);
+                    if refund > 0 {
+                        let usd = state.usd_mut(msg.user_id);
+                        usd.locked    -= refund;
+                        usd.available += refund;
+                    }
+
+                    let status = if filled_qty == qty {
+                        "filled"
+                    } else if filled_qty > 0 {
+                        "partially_filled"
+                    } else {
+                        "unfilled"
+                    };
+
+                    reply(publisher, &msg.queue_id, &OrderReply {
+                        identifier:  msg.identifier,
+                        order_id:    None,
+                        status:      Some(status.to_string()),
+                        error:       None,
+                        status_code: None,
+                    }).await;
+                }
+            }
+        }
+    }
 }
 
 /// Apply a fill to the balance ledger.
