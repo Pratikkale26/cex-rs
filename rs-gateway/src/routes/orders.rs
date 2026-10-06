@@ -29,6 +29,7 @@ pub async fn place_order(
         order_type,
         price: body.price,
         qty: body.qty,
+        slippage_pct: body.slippage_pct,
         queue_id: state.queue_id.clone(),
         identifier: identifier.clone(),
     };

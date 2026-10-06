@@ -34,15 +34,16 @@ pub enum OrderType {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct OrderMsg {
-    pub user_id:    u64,
-    pub asset:      String,
-    pub side:       String, // "bid" | "ask"
+    pub user_id:      u64,
+    pub asset:        String,
+    pub side:         String, // "bid" | "ask"
     #[serde(default)] // it will make Limit as default if missing
     pub order_type:   OrderType, // "limit" | "market"
-    pub price:      i64,
-    pub qty:        i64,
-    pub queue_id:   String,
-    pub identifier: String,
+    pub price:        i64,
+    pub qty:          i64,
+    pub slippage_pct: Option<f64>,
+    pub queue_id:     String,
+    pub identifier:   String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

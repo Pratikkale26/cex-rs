@@ -249,10 +249,13 @@ impl Orderbook {
 
     /// Calculate the total quote currency (USD) needed to buy `qty` from current asks.
     /// Returns (total_cost, fillable_qty).
-    pub fn quote_cost_for_market_buy(&self, mut qty: Quantity) -> (u64, Quantity) {
+    pub fn quote_cost_for_market_buy(&self, mut qty: Quantity, worst_price: Option<Price>) -> (u64, Quantity) {
         let mut total_cost = 0_u64;
         let mut fillable_qty = 0_u64;
         for (&price, level) in &self.asks {
+            if worst_price.is_some_and(|cap| price > cap) {
+                break;
+            }
             for &order_id in &level.orders {
                 if let Some(order) = self.orders.get(&order_id) {
                     let take = qty.min(order.remaining_qty);
@@ -275,6 +278,7 @@ impl Orderbook {
         user_id: UserId,
         side:    Side,
         qty:     Quantity,
+        worst_price: Option<Price>,
     ) -> Result<Vec<MatchResult>, OrderbookError> {
         if qty == 0 { return Err(OrderbookError::InvalidQuantity); }
 
@@ -293,6 +297,16 @@ impl Orderbook {
                 Some(p) => p,
                 None    => break, // No more liquidity available on opposite side
             };
+
+            if let Some(cap) = worst_price {
+                let exceeds = match side {
+                    Side::Bid => resting_price > cap, // Price is too expensive to buyy
+                    Side::Ask => resting_price < cap, // price to too low to sell
+                };
+                if exceeds {
+                    break;
+                }
+            }
 
             loop {
                 if remaining_qty == 0 { break; }

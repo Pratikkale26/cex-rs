@@ -760,7 +760,8 @@ async fn test_market_order_e2e_lifecycle() {
             "asset": "sol",
             "side": "bid",
             "order_type": "market",
-            "qty": 7
+            "qty": 7,
+            "slippage_pct": 15.0
         }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -836,6 +837,96 @@ async fn test_market_order_e2e_lifecycle() {
 
     engine_handle.abort();
 }
+
+#[serial]
+#[actix_web::test]
+async fn test_market_buy_default_slippage_protection() {
+    let (app_state, engine_handle) = match setup_app_state().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .wrap(rate_limit::RateLimitMiddleware::default())
+            .configure(routes::configure)
+    ).await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Register Seller (Alice) and Buyer (Bob)
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "alice_slip", "password": "Password@123" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "alice_slip", "password": "Password@123" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let alice_token = body["token"].as_str().unwrap().to_string();
+
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "bob_slip", "password": "Password@123" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "bob_slip", "password": "Password@123" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let bob_token = body["token"].as_str().unwrap().to_string();
+
+    // 3. Fund accounts
+    let req = test::TestRequest::post().uri("/deposit/sol")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "qty": 10 })).to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post().uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 1000 })).to_request();
+    test::call_service(&app, req).await;
+
+    // 4. Alice posts Asks: 5 SOL @ $100, 5 SOL @ $120 (+20% higher!)
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "asset": "sol", "side": "ask", "price": 100, "qty": 5 })).to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "asset": "sol", "side": "ask", "price": 120, "qty": 5 })).to_request();
+    test::call_service(&app, req).await;
+
+    // 5. Bob sends Market Buy for 8 SOL with NO slippage specified (defaults to 5%):
+    // Best ask is $100 -> 5% cap is $105!
+    // The $120 ask is > $105, so it must NOT fill!
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "order_type": "market",
+            "qty": 8
+        })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let order_resp: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(order_resp["status"], "partially_filled", "5% slippage cap prevents paying $120");
+
+    // 6. Verify Bob only received 5 SOL and paid 5 * 100 = $500:
+    let req = test::TestRequest::get().uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {bob_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["stockBalance"]["sol"]["available"], 5);
+    assert_eq!(bal["usdBalance"]["available"], 500);
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    engine_handle.abort();
+}
+
 
 
 

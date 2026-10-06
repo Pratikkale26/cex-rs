@@ -127,8 +127,20 @@ pub async fn handle_order(
         }
 
         OrderType::Market => {
+            // Determine slippage percentage: use user specified, or default to 5.0%
+            let slippage = msg.slippage_pct.unwrap_or(5.0);
+
             match side {
                 Side::Ask => {
+                    let worst_price = if msg.price > 0 {
+                        Some(msg.price as u64)
+                    } else if let Some(best_bid) = state.sol_orderbook.best_bid() {
+                        let floor = (best_bid as f64 * (1.0 - slippage / 100.0)).floor() as u64;
+                        Some(floor.max(1))
+                    } else {
+                        None
+                    };
+
                     // Market Sell: Lock `qty` SOL upfront.
                     let sol = state.sol_mut(msg.user_id);
                     if sol.available < qty {
@@ -139,7 +151,7 @@ pub async fn handle_order(
                     sol.available -= qty;
                     sol.locked    += qty;
 
-                    let results = state.sol_orderbook.execute_market_order(msg.user_id, side, qty)
+                    let results = state.sol_orderbook.execute_market_order(msg.user_id, side, qty, worst_price)
                         .expect("qty validated");
 
                     let mut filled_qty = 0_u64;
@@ -167,7 +179,7 @@ pub async fn handle_order(
                         }
                     }
 
-                    // Refund unsold SOL if book liquidity ran out
+                    // Refund unsold SOL if book liquidity ran out or slippage limit was hit
                     let unfilled_qty = qty - filled_qty;
                     if unfilled_qty > 0 {
                         let sol = state.sol_mut(msg.user_id);
@@ -193,11 +205,20 @@ pub async fn handle_order(
                 }
 
                 Side::Bid => {
-                    // Market Buy: Calculate required USD from available ask liquidity.
-                    let (required_usd, fillable_qty) = state.sol_orderbook.quote_cost_for_market_buy(qty);
+                    let worst_price = if msg.price > 0 {
+                        Some(msg.price as u64)
+                    } else if let Some(best_ask) = state.sol_orderbook.best_ask() {
+                        let cap = (best_ask as f64 * (1.0 + slippage / 100.0)).ceil() as u64;
+                        Some(cap)
+                    } else {
+                        None
+                    };
+
+                    // Market Buy: Calculate required USD from available ask liquidity within slippage.
+                    let (required_usd, fillable_qty) = state.sol_orderbook.quote_cost_for_market_buy(qty, worst_price);
                     if fillable_qty == 0 {
                         reply_error(publisher, &msg.queue_id, &msg.identifier,
-                                    "No ask liquidity available in orderbook", 400).await;
+                                    "No ask liquidity available within slippage limit", 400).await;
                         return;
                     }
 
@@ -210,7 +231,7 @@ pub async fn handle_order(
                     usd.available -= required_usd;
                     usd.locked    += required_usd;
 
-                    let results = state.sol_orderbook.execute_market_order(msg.user_id, side, qty)
+                    let results = state.sol_orderbook.execute_market_order(msg.user_id, side, qty, worst_price)
                         .expect("qty validated");
 
                     let mut filled_qty = 0_u64;

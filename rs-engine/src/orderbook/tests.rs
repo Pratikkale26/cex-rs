@@ -264,7 +264,7 @@ fn test_market_buy_sweeps_multiple_levels_no_resting() {
     b.add_order(2, Side::Ask, 110, 5).unwrap();
 
     // Market buy 7 SOL (takes 5 @ 100, 2 @ 110)
-    let results = b.execute_market_order(3, Side::Bid, 7).unwrap();
+    let results = b.execute_market_order(3, Side::Bid, 7, None).unwrap();
     assert_eq!(results.len(), 2);
 
     match &results[0] {
@@ -302,7 +302,7 @@ fn test_market_order_partial_fill_remainder_killed() {
     b.add_order(1, Side::Bid, 95, 4).unwrap();
 
     // Market sell 10 SOL: fills 4, kills 6
-    let results = b.execute_market_order(2, Side::Ask, 10).unwrap();
+    let results = b.execute_market_order(2, Side::Ask, 10, None).unwrap();
     assert_eq!(results.len(), 1);
     match &results[0] {
         MatchResult::Trade(t) => {
@@ -326,12 +326,60 @@ fn test_quote_cost_for_market_buy_calculation() {
     b.add_order(2, Side::Ask, 110, 5).unwrap();
 
     // 7 SOL: 5*100 + 2*110 = 500 + 220 = 720 USD, fillable: 7
-    let (cost, fillable) = b.quote_cost_for_market_buy(7);
+    let (cost, fillable) = b.quote_cost_for_market_buy(7, None);
     assert_eq!(cost, 720);
     assert_eq!(fillable, 7);
 
     // 15 SOL (more than total depth 10): 5*100 + 5*110 = 1050 USD, fillable: 10
-    let (cost_over, fillable_over) = b.quote_cost_for_market_buy(15);
+    let (cost_over, fillable_over) = b.quote_cost_for_market_buy(15, None);
     assert_eq!(cost_over, 1050);
     assert_eq!(fillable_over, 10);
+}
+
+#[test]
+fn test_market_buy_slippage_cap_stops_matching() {
+    let mut b = book();
+    // Setup asks: 5 SOL @ 100, 5 SOL @ 120
+    b.add_order(1, Side::Ask, 100, 5).unwrap();
+    b.add_order(2, Side::Ask, 120, 5).unwrap();
+
+    // Market buy 10 SOL, but cap worst price at 105:
+    // Should fill 5 @ 100, but reject the 120 level because 120 > 105!
+    let results = b.execute_market_order(3, Side::Bid, 10, Some(105)).unwrap();
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 100);
+            assert_eq!(t.qty, 5);
+        }
+        _ => panic!("expected trade"),
+    }
+
+    // The 120 ask level was NOT touched
+    assert_eq!(b.best_ask(), Some(120));
+    assert_eq!(b.get_state().asks[0].qty, 5);
+}
+
+#[test]
+fn test_market_sell_slippage_floor_stops_matching() {
+    let mut b = book();
+    // Setup bids: 5 SOL @ 100, 5 SOL @ 80
+    b.add_order(1, Side::Bid, 100, 5).unwrap();
+    b.add_order(2, Side::Bid, 80, 5).unwrap();
+
+    // Market sell 10 SOL, but cap worst price at 95 floor:
+    // Should fill 5 @ 100, but refuse to sell at 80 because 80 < 95!
+    let results = b.execute_market_order(3, Side::Ask, 10, Some(95)).unwrap();
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 100);
+            assert_eq!(t.qty, 5);
+        }
+        _ => panic!("expected trade"),
+    }
+
+    // The 80 bid level was NOT touched
+    assert_eq!(b.best_bid(), Some(80));
+    assert_eq!(b.get_state().bids[0].qty, 5);
 }
