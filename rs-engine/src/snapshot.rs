@@ -68,7 +68,7 @@ mod tests {
         state.sol_mut(2).available = 5;
 
         // Place a resting order
-        state.sol_orderbook.add_order(1, Side::Bid, 100, 2).unwrap();
+        state.sol_orderbook.add_order(1, Side::Bid, 100, 2, rs_shared::TimeInForce::Gtc).unwrap();
 
         // Serialize to JSON value
         let val = serde_json::to_value(&state).expect("serialize");

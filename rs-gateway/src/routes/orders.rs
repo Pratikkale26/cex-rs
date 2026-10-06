@@ -21,6 +21,12 @@ pub async fn place_order(
         _ => OrderType::Limit
     };
 
+    let time_in_force = match body.time_in_force.as_deref().map(|s| s.to_uppercase()).as_deref() {
+        Some("IOC") => TimeInForce::Ioc,
+        Some("FOK") => TimeInForce::Fok,
+        _ => TimeInForce::Gtc,
+    };
+
     let identifier = uuid::Uuid::new_v4().to_string();
     let msg = OrderMsg {
         user_id: auth.0,
@@ -30,6 +36,7 @@ pub async fn place_order(
         price: body.price,
         qty: body.qty,
         slippage_pct: body.slippage_pct,
+        time_in_force,
         queue_id: state.queue_id.clone(),
         identifier: identifier.clone(),
     };

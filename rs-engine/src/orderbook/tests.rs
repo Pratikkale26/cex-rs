@@ -6,7 +6,7 @@ fn book() -> Orderbook { Orderbook::new("SOL-USDT") }
 #[test]
 fn bid_rests_when_no_asks() {
     let mut b = book();
-    let r = b.add_order(1, Side::Bid, 100, 10).unwrap();
+    let r = b.add_order(1, Side::Bid, 100, 10, TimeInForce::Gtc).unwrap();
     assert_eq!(r.len(), 1);
     assert!(matches!(r[0], MatchResult::OrderAccepted(_)));
     assert_eq!(b.best_bid(), Some(100));
@@ -16,7 +16,7 @@ fn bid_rests_when_no_asks() {
 #[test]
 fn ask_rests_when_no_bids() {
     let mut b = book();
-    b.add_order(1, Side::Ask, 110, 10).unwrap();
+    b.add_order(1, Side::Ask, 110, 10, TimeInForce::Gtc).unwrap();
     assert_eq!(b.best_ask(), Some(110));
     assert_eq!(b.best_bid(), None);
 }
@@ -25,10 +25,10 @@ fn ask_rests_when_no_bids() {
 fn exact_match() {
     let mut b = book();
     // Maker: resting ask at 100, qty 5
-    b.add_order(1, Side::Ask, 100, 5).unwrap();
+    b.add_order(1, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
 
     // Taker: bid at 100, qty 5 — exact match
-    let r = b.add_order(2, Side::Bid, 100, 5).unwrap();
+    let r = b.add_order(2, Side::Bid, 100, 5, TimeInForce::Gtc).unwrap();
     assert_eq!(r.len(), 1);
 
     match &r[0] {
@@ -50,10 +50,10 @@ fn exact_match() {
 fn partial_fill_maker_partially_consumed() {
     let mut b = book();
     // Maker: ask at 100, qty 10
-    b.add_order(1, Side::Ask, 100, 10).unwrap();
+    b.add_order(1, Side::Ask, 100, 10, TimeInForce::Gtc).unwrap();
 
     // Taker: bid at 100, qty 4
-    let r = b.add_order(2, Side::Bid, 100, 4).unwrap();
+    let r = b.add_order(2, Side::Bid, 100, 4, TimeInForce::Gtc).unwrap();
     assert_eq!(r.len(), 1);
 
     match &r[0] {
@@ -73,10 +73,10 @@ fn partial_fill_maker_partially_consumed() {
 fn partial_taker_rests_remainder() {
     let mut b = book();
     // Maker: ask at 100, qty 4
-    b.add_order(1, Side::Ask, 100, 4).unwrap();
+    b.add_order(1, Side::Ask, 100, 4, TimeInForce::Gtc).unwrap();
 
     // Taker: bid at 100, qty 10 — fills 4, rests 6 as bid
-    let r = b.add_order(2, Side::Bid, 100, 10).unwrap();
+    let r = b.add_order(2, Side::Bid, 100, 10, TimeInForce::Gtc).unwrap();
     assert_eq!(r.len(), 2);
 
     match &r[0] {
@@ -98,11 +98,11 @@ fn partial_taker_rests_remainder() {
 #[test]
 fn incoming_order_fills_multiple_makers() {
     let mut b = book();
-    b.add_order(1, Side::Ask, 100, 3).unwrap();
-    b.add_order(2, Side::Ask, 101, 4).unwrap();
+    b.add_order(1, Side::Ask, 100, 3, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Ask, 101, 4, TimeInForce::Gtc).unwrap();
 
     // Taker bid at 102 for qty 6: fills 3@100, then 3@101
-    let r = b.add_order(3, Side::Bid, 102, 6).unwrap();
+    let r = b.add_order(3, Side::Bid, 102, 6, TimeInForce::Gtc).unwrap();
     assert_eq!(r.len(), 2);
 
     match &r[0] {
@@ -124,11 +124,11 @@ fn incoming_order_fills_multiple_makers() {
 fn preserves_fifo_at_same_price() {
     let mut b = book();
     // Two asks at 100: user 1 first, user 2 second
-    b.add_order(1, Side::Ask, 100, 5).unwrap();
-    b.add_order(2, Side::Ask, 100, 5).unwrap();
+    b.add_order(1, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
 
     // Taker takes 6: should fully fill user 1 (5), then take 1 from user 2
-    let r = b.add_order(3, Side::Bid, 100, 6).unwrap();
+    let r = b.add_order(3, Side::Bid, 100, 6, TimeInForce::Gtc).unwrap();
     assert_eq!(r.len(), 2);
 
     match &r[0] {
@@ -154,11 +154,11 @@ fn preserves_fifo_at_same_price() {
 #[test]
 fn matches_best_price_first() {
     let mut b = book();
-    b.add_order(1, Side::Ask, 105, 5).unwrap();
-    b.add_order(2, Side::Ask, 100, 5).unwrap(); // better ask
+    b.add_order(1, Side::Ask, 105, 5, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap(); // better ask
 
     // Taker bid at 110: must match 100 first, not 105
-    let r = b.add_order(3, Side::Bid, 110, 3).unwrap();
+    let r = b.add_order(3, Side::Bid, 110, 3, TimeInForce::Gtc).unwrap();
     assert_eq!(r.len(), 1);
 
     match &r[0] {
@@ -170,10 +170,10 @@ fn matches_best_price_first() {
 #[test]
 fn non_crossing_order_rests() {
     let mut b = book();
-    b.add_order(1, Side::Ask, 105, 5).unwrap();
+    b.add_order(1, Side::Ask, 105, 5, TimeInForce::Gtc).unwrap();
 
     // Bid at 100 does not cross ask at 105: both rest
-    let r = b.add_order(2, Side::Bid, 100, 5).unwrap();
+    let r = b.add_order(2, Side::Bid, 100, 5, TimeInForce::Gtc).unwrap();
     assert_eq!(r.len(), 1);
     assert!(matches!(r[0], MatchResult::OrderAccepted(_)));
 
@@ -184,7 +184,7 @@ fn non_crossing_order_rests() {
 #[test]
 fn cancel_bid() {
     let mut b = book();
-    let r = b.add_order(1, Side::Bid, 100, 5).unwrap();
+    let r = b.add_order(1, Side::Bid, 100, 5, TimeInForce::Gtc).unwrap();
     let order_id = match &r[0] {
         MatchResult::OrderAccepted(acc) => acc.order_id,
         _ => panic!("expected OrderAccepted"),
@@ -200,7 +200,7 @@ fn cancel_bid() {
 #[test]
 fn cannot_cancel_others_order() {
     let mut b = book();
-    let r = b.add_order(1, Side::Bid, 100, 5).unwrap();
+    let r = b.add_order(1, Side::Bid, 100, 5, TimeInForce::Gtc).unwrap();
     let order_id = match &r[0] {
         MatchResult::OrderAccepted(acc) => acc.order_id,
         _ => panic!("expected OrderAccepted"),
@@ -220,21 +220,21 @@ fn cannot_cancel_nonexistent() {
 #[test]
 fn rejects_zero_price() {
     let mut b = book();
-    assert_eq!(b.add_order(1, Side::Bid, 0, 10), Err(OrderbookError::InvalidPrice));
+    assert_eq!(b.add_order(1, Side::Bid, 0, 10, TimeInForce::Gtc), Err(OrderbookError::InvalidPrice));
 }
 
 #[test]
 fn rejects_zero_qty() {
     let mut b = book();
-    assert_eq!(b.add_order(1, Side::Bid, 100, 0), Err(OrderbookError::InvalidQuantity));
+    assert_eq!(b.add_order(1, Side::Bid, 100, 0, TimeInForce::Gtc), Err(OrderbookError::InvalidQuantity));
 }
 
 #[test]
 fn get_user_orders_filtered() {
     let mut b = book();
-    b.add_order(1, Side::Bid, 100, 5).unwrap();
-    b.add_order(2, Side::Bid, 100, 5).unwrap();
-    b.add_order(1, Side::Ask, 110, 3).unwrap();
+    b.add_order(1, Side::Bid, 100, 5, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Bid, 100, 5, TimeInForce::Gtc).unwrap();
+    b.add_order(1, Side::Ask, 110, 3, TimeInForce::Gtc).unwrap();
 
     let u1_orders = b.get_user_orders(1);
     assert_eq!(u1_orders.len(), 2);
@@ -247,9 +247,9 @@ fn get_user_orders_filtered() {
 fn get_user_orders_remaining_qty_after_partial_fill() {
     let mut b = book();
     // Maker rests 10
-    b.add_order(1, Side::Ask, 100, 10).unwrap();
+    b.add_order(1, Side::Ask, 100, 10, TimeInForce::Gtc).unwrap();
     // Taker takes 4
-    b.add_order(2, Side::Bid, 100, 4).unwrap();
+    b.add_order(2, Side::Bid, 100, 4, TimeInForce::Gtc).unwrap();
 
     let orders = b.get_user_orders(1);
     assert_eq!(orders.len(), 1);
@@ -260,8 +260,8 @@ fn get_user_orders_remaining_qty_after_partial_fill() {
 fn test_market_buy_sweeps_multiple_levels_no_resting() {
     let mut b = book();
     // Setup asks: 5 SOL @ 100, 5 SOL @ 110
-    b.add_order(1, Side::Ask, 100, 5).unwrap();
-    b.add_order(2, Side::Ask, 110, 5).unwrap();
+    b.add_order(1, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Ask, 110, 5, TimeInForce::Gtc).unwrap();
 
     // Market buy 7 SOL (takes 5 @ 100, 2 @ 110)
     let results = b.execute_market_order(3, Side::Bid, 7, None).unwrap();
@@ -299,7 +299,7 @@ fn test_market_buy_sweeps_multiple_levels_no_resting() {
 fn test_market_order_partial_fill_remainder_killed() {
     let mut b = book();
     // Only 4 SOL available in bids @ 95
-    b.add_order(1, Side::Bid, 95, 4).unwrap();
+    b.add_order(1, Side::Bid, 95, 4, TimeInForce::Gtc).unwrap();
 
     // Market sell 10 SOL: fills 4, kills 6
     let results = b.execute_market_order(2, Side::Ask, 10, None).unwrap();
@@ -322,8 +322,8 @@ fn test_market_order_partial_fill_remainder_killed() {
 #[test]
 fn test_quote_cost_for_market_buy_calculation() {
     let mut b = book();
-    b.add_order(1, Side::Ask, 100, 5).unwrap();
-    b.add_order(2, Side::Ask, 110, 5).unwrap();
+    b.add_order(1, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Ask, 110, 5, TimeInForce::Gtc).unwrap();
 
     // 7 SOL: 5*100 + 2*110 = 500 + 220 = 720 USD, fillable: 7
     let (cost, fillable) = b.quote_cost_for_market_buy(7, None);
@@ -340,8 +340,8 @@ fn test_quote_cost_for_market_buy_calculation() {
 fn test_market_buy_slippage_cap_stops_matching() {
     let mut b = book();
     // Setup asks: 5 SOL @ 100, 5 SOL @ 120
-    b.add_order(1, Side::Ask, 100, 5).unwrap();
-    b.add_order(2, Side::Ask, 120, 5).unwrap();
+    b.add_order(1, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Ask, 120, 5, TimeInForce::Gtc).unwrap();
 
     // Market buy 10 SOL, but cap worst price at 105:
     // Should fill 5 @ 100, but reject the 120 level because 120 > 105!
@@ -364,8 +364,8 @@ fn test_market_buy_slippage_cap_stops_matching() {
 fn test_market_sell_slippage_floor_stops_matching() {
     let mut b = book();
     // Setup bids: 5 SOL @ 100, 5 SOL @ 80
-    b.add_order(1, Side::Bid, 100, 5).unwrap();
-    b.add_order(2, Side::Bid, 80, 5).unwrap();
+    b.add_order(1, Side::Bid, 100, 5, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Bid, 80, 5, TimeInForce::Gtc).unwrap();
 
     // Market sell 10 SOL, but cap worst price at 95 floor:
     // Should fill 5 @ 100, but refuse to sell at 80 because 80 < 95!
@@ -382,4 +382,122 @@ fn test_market_sell_slippage_floor_stops_matching() {
     // The 80 bid level was NOT touched
     assert_eq!(b.best_bid(), Some(80));
     assert_eq!(b.get_state().bids[0].qty, 5);
+}
+
+#[test]
+fn test_ioc_order_partial_fill_remainder_killed_no_resting() {
+    let mut b = book();
+    // Maker ask: 5 @ 100
+    b.add_order(1, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
+
+    // Taker IOC limit bid: 10 @ 100
+    // Should fill 5 @ 100 and kill the remaining 5 immediately without resting on book
+    let results = b.add_order(2, Side::Bid, 100, 10, TimeInForce::Ioc).unwrap();
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 100);
+            assert_eq!(t.qty, 5);
+            assert_eq!(t.buyer, 2);
+            assert_eq!(t.seller, 1);
+        }
+        _ => panic!("expected trade"),
+    }
+
+    // Opposite ask side is now completely consumed
+    assert_eq!(b.best_ask(), None);
+    // Taker bid NEVER rests on the book
+    assert_eq!(b.best_bid(), None);
+    assert_eq!(b.get_user_orders(2).len(), 0);
+}
+
+#[test]
+fn test_ioc_order_zero_fill_kills_immediately() {
+    let mut b = book();
+    // Maker ask: 5 @ 100
+    b.add_order(1, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
+
+    // Taker IOC limit bid at 90 (below best ask): 0 fills, killed immediately
+    let results = b.add_order(2, Side::Bid, 90, 5, TimeInForce::Ioc).unwrap();
+    assert_eq!(results.len(), 0);
+
+    // Book retains maker ask
+    assert_eq!(b.best_ask(), Some(100));
+    assert_eq!(b.best_bid(), None);
+    assert_eq!(b.get_user_orders(2).len(), 0);
+}
+
+#[test]
+fn test_fok_order_kills_when_depth_insufficient() {
+    let mut b = book();
+    // Maker ask: 5 @ 100
+    b.add_order(1, Side::Ask, 100, 5, TimeInForce::Gtc).unwrap();
+
+    // Taker FOK limit bid: 6 @ 100 (needs 6, but only 5 available)
+    // FOK must kill entire order with 0 trades!
+    let results = b.add_order(2, Side::Bid, 100, 6, TimeInForce::Fok).unwrap();
+    assert_eq!(results.len(), 0);
+
+    // Maker ask is 100% untouched
+    assert_eq!(b.best_ask(), Some(100));
+    assert_eq!(b.get_state().asks[0].qty, 5);
+    assert_eq!(b.best_bid(), None);
+    assert_eq!(b.get_user_orders(2).len(), 0);
+}
+
+#[test]
+fn test_fok_order_fills_completely_when_depth_sufficient() {
+    let mut b = book();
+    // Multi-level asks: 3 @ 100, 4 @ 102
+    b.add_order(1, Side::Ask, 100, 3, TimeInForce::Gtc).unwrap();
+    b.add_order(2, Side::Ask, 102, 4, TimeInForce::Gtc).unwrap();
+
+    // Taker FOK limit bid: 6 @ 102 (can cross 3@100 + 3@102 = 6 total)
+    let results = b.add_order(3, Side::Bid, 102, 6, TimeInForce::Fok).unwrap();
+    assert_eq!(results.len(), 2);
+
+    match &results[0] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 100);
+            assert_eq!(t.qty, 3);
+        }
+        _ => panic!("expected trade"),
+    }
+    match &results[1] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 102);
+            assert_eq!(t.qty, 3);
+        }
+        _ => panic!("expected trade"),
+    }
+
+    // Remaining ask level: 1 unit @ 102
+    assert_eq!(b.best_ask(), Some(102));
+    assert_eq!(b.get_state().asks[0].qty, 1);
+    assert_eq!(b.best_bid(), None);
+}
+
+#[test]
+fn test_fok_order_ask_side() {
+    let mut b = book();
+    // Maker bid: 5 @ 100
+    b.add_order(1, Side::Bid, 100, 5, TimeInForce::Gtc).unwrap();
+
+    // FOK Ask for 8 @ 95 -> insufficient depth (5 < 8) -> kills
+    let r1 = b.add_order(2, Side::Ask, 95, 8, TimeInForce::Fok).unwrap();
+    assert_eq!(r1.len(), 0);
+    assert_eq!(b.best_bid(), Some(100));
+    assert_eq!(b.get_state().bids[0].qty, 5);
+
+    // FOK Ask for 5 @ 95 -> exact depth -> fills all 5
+    let r2 = b.add_order(2, Side::Ask, 95, 5, TimeInForce::Fok).unwrap();
+    assert_eq!(r2.len(), 1);
+    match &r2[0] {
+        MatchResult::Trade(t) => {
+            assert_eq!(t.price, 100);
+            assert_eq!(t.qty, 5);
+        }
+        _ => panic!("expected trade"),
+    }
+    assert_eq!(b.best_bid(), None);
 }

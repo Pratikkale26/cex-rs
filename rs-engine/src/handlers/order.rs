@@ -68,15 +68,26 @@ pub async fn handle_order(
             }
 
             // ── Place limit order ─────────────────────────────────────────
-            let results = state.sol_orderbook.add_order(msg.user_id, side, price, qty)
+            let results = state.sol_orderbook.add_order(msg.user_id, side, price, qty, msg.time_in_force)
                 .expect("price/qty already validated above");
 
             let mut resting_order: Option<crate::orderbook::OrderAccepted> = None;
+            let mut filled_qty = 0_u64;
 
             for result in results {
                 match result {
                     MatchResult::Trade(trade) => {
                         apply_fill(state, &trade);
+                        filled_qty += trade.qty;
+
+                        // Price improvement refund for taker buyer:
+                        if side == Side::Bid && price > trade.price {
+                            let savings = (price - trade.price) * trade.qty;
+                            let usd = state.usd_mut(msg.user_id);
+                            usd.locked -= savings;
+                            usd.available += savings;
+                        }
+
                         let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
                             .map(|o| o.remaining_qty)
                             .unwrap_or(0);
@@ -100,6 +111,24 @@ pub async fn handle_order(
                 }
             }
 
+            // Refund unfilled quantity for non-resting orders (IOC / FOK)
+            let unfilled_qty = qty - filled_qty;
+            if msg.time_in_force != TimeInForce::Gtc && unfilled_qty > 0 {
+                match side {
+                    Side::Bid => {
+                        let refund = unfilled_qty * price;
+                        let usd = state.usd_mut(msg.user_id);
+                        usd.locked -= refund;
+                        usd.available += refund;
+                    }
+                    Side::Ask => {
+                        let sol = state.sol_mut(msg.user_id);
+                        sol.locked -= unfilled_qty;
+                        sol.available += unfilled_qty;
+                    }
+                }
+            }
+
             let (order_id, status) = match resting_order {
                 Some(acc) => {
                     emit_execution(publisher.as_deref_mut(), &ExecutionEvent::OrderCreated {
@@ -114,7 +143,16 @@ pub async fn handle_order(
                     }).await;
                     (Some(acc.order_id), "open")
                 }
-                None => (None, "filled"),
+                None => {
+                    let s = if filled_qty == qty {
+                        "filled"
+                    } else if filled_qty > 0 {
+                        "partially_filled"
+                    } else {
+                        "unfilled"
+                    };
+                    (None, s)
+                }
             };
 
             reply(publisher, &msg.queue_id, &OrderReply {
@@ -140,6 +178,21 @@ pub async fn handle_order(
                     } else {
                         None
                     };
+
+                    // If FOK, check that entire qty can be filled within slippage:
+                    if msg.time_in_force == TimeInForce::Fok {
+                        let fillable = state.sol_orderbook.fillable_qty_for_market_sell(qty, worst_price);
+                        if fillable < qty {
+                            reply(publisher, &msg.queue_id, &OrderReply {
+                                identifier:  msg.identifier,
+                                order_id:    None,
+                                status:      Some("unfilled".to_string()),
+                                error:       None,
+                                status_code: None,
+                            }).await;
+                            return;
+                        }
+                    }
 
                     // Market Sell: Lock `qty` SOL upfront.
                     let sol = state.sol_mut(msg.user_id);
@@ -216,7 +269,17 @@ pub async fn handle_order(
 
                     // Market Buy: Calculate required USD from available ask liquidity within slippage.
                     let (required_usd, fillable_qty) = state.sol_orderbook.quote_cost_for_market_buy(qty, worst_price);
-                    if fillable_qty == 0 {
+                    if fillable_qty == 0 || (msg.time_in_force == TimeInForce::Fok && fillable_qty < qty) {
+                        if msg.time_in_force == TimeInForce::Fok && fillable_qty < qty {
+                            reply(publisher, &msg.queue_id, &OrderReply {
+                                identifier:  msg.identifier,
+                                order_id:    None,
+                                status:      Some("unfilled".to_string()),
+                                error:       None,
+                                status_code: None,
+                            }).await;
+                            return;
+                        }
                         reply_error(publisher, &msg.queue_id, &msg.identifier,
                                     "No ask liquidity available within slippage limit", 400).await;
                         return;

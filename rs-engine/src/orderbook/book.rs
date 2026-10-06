@@ -101,16 +101,63 @@ impl Orderbook {
         OrderbookSnapshot { symbol: self.symbol.clone(), bids, asks }
     }
 
+    /// Check whether there is sufficient liquidity on the opposite side crossing `price`
+    /// to completely fill `qty` units (required for FOK orders).
+    pub fn can_fill_quantity(&self, side: Side, price: Price, qty: Quantity) -> bool {
+        if qty == 0 {
+            return true;
+        }
+        let mut available = 0;
+        match side {
+            Side::Bid => {
+                for (&ask_price, level) in &self.asks {
+                    if ask_price > price {
+                        break;
+                    }
+                    for &order_id in &level.orders {
+                        if let Some(order) = self.orders.get(&order_id) {
+                            available += order.remaining_qty;
+                            if available >= qty {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            Side::Ask => {
+                for (&bid_price, level) in self.bids.iter().rev() {
+                    if bid_price < price {
+                        break;
+                    }
+                    for &order_id in &level.orders {
+                        if let Some(order) = self.orders.get(&order_id) {
+                            available += order.remaining_qty;
+                            if available >= qty {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Place an order. Returns a list of fills + possibly one resting-order event.
     pub fn add_order(
         &mut self,
-        user_id: UserId,
-        side:    Side,
-        price:   Price,
-        qty:     Quantity,
+        user_id:       UserId,
+        side:          Side,
+        price:         Price,
+        qty:           Quantity,
+        time_in_force: TimeInForce,
     ) -> Result<Vec<MatchResult>, OrderbookError> {
         if price == 0 { return Err(OrderbookError::InvalidPrice);    }
         if qty   == 0 { return Err(OrderbookError::InvalidQuantity); }
+
+        if time_in_force == TimeInForce::Fok && !self.can_fill_quantity(side, price, qty) {
+            return Ok(Vec::new());
+        }
 
         let order_id       = self.next_order_id;
         self.next_order_id += 1;
@@ -214,8 +261,8 @@ impl Orderbook {
             }
         }
 
-        // ── Rest any unfilled quantity ────────────────────────────────────
-        if remaining_qty > 0 {
+        // ── Rest any unfilled quantity (only for GTC orders) ──────────────
+        if remaining_qty > 0 && time_in_force == TimeInForce::Gtc {
             let order = Order {
                 order_id,
                 user_id,
@@ -269,6 +316,27 @@ impl Orderbook {
             }
         }
         (total_cost, fillable_qty)
+    }
+
+    /// Calculate the fillable quantity for a market sell across bids down to `worst_price`.
+    pub fn fillable_qty_for_market_sell(&self, mut qty: Quantity, worst_price: Option<Price>) -> Quantity {
+        let mut fillable_qty = 0_u64;
+        for (&price, level) in self.bids.iter().rev() {
+            if worst_price.is_some_and(|floor| price < floor) {
+                break;
+            }
+            for &order_id in &level.orders {
+                if let Some(order) = self.orders.get(&order_id) {
+                    let take = qty.min(order.remaining_qty);
+                    fillable_qty += take;
+                    qty -= take;
+                    if qty == 0 {
+                        return fillable_qty;
+                    }
+                }
+            }
+        }
+        fillable_qty
     }
 
     /// Execute a market order immediately against opposite book depth.

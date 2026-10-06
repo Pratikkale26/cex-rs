@@ -927,6 +927,148 @@ async fn test_market_buy_default_slippage_protection() {
     engine_handle.abort();
 }
 
+#[serial]
+#[actix_web::test]
+async fn test_time_in_force_gtc_ioc_and_fok_policies() {
+    let (app_state, engine_handle) = match setup_app_state().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .wrap(rate_limit::RateLimitMiddleware::default())
+            .configure(routes::configure)
+    ).await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Register Seller (Alice) and Buyer (Bob)
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "alice_tif", "password": "Password@123" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "alice_tif", "password": "Password@123" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let alice_token = body["token"].as_str().unwrap().to_string();
+
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "bob_tif", "password": "Password@123" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "bob_tif", "password": "Password@123" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let bob_token = body["token"].as_str().unwrap().to_string();
+
+    // 3. Fund accounts: Alice with 20 SOL, Bob with $2000 USD
+    let req = test::TestRequest::post().uri("/deposit/sol")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "qty": 20 })).to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post().uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 2000 })).to_request();
+    test::call_service(&app, req).await;
+
+    // ── Test FOK (Fill-Or-Kill): Kills when depth is insufficient ──
+    // Alice posts 5 SOL @ $100
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "asset": "sol", "side": "ask", "price": 100, "qty": 5, "time_in_force": "GTC" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Bob places FOK Limit Bid for 8 SOL @ $100 (only 5 available -> must KILL completely!)
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "order_type": "limit",
+            "price": 100,
+            "qty": 8,
+            "time_in_force": "FOK"
+        })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let fok_resp: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(fok_resp["status"], "unfilled", "FOK order killed because available depth (5) < requested qty (8)");
+
+    // Bob has 0 locked USD and still 2000 available USD
+    let req = test::TestRequest::get().uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {bob_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["usdBalance"]["available"], 2000);
+    assert_eq!(bal["usdBalance"]["locked"], 0);
+
+    // ── Test IOC (Immediate-Or-Cancel): Partially fills and cancels remainder ──
+    // Bob sends IOC Limit Bid for 8 SOL @ $100: fills 5 @ $100, kills the remaining 3 SOL!
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "order_type": "limit",
+            "price": 100,
+            "qty": 8,
+            "time_in_force": "IOC"
+        })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let ioc_resp: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(ioc_resp["status"], "partially_filled");
+
+    // Bob now has 5 SOL, paid $500. Remaining $300 locked is refunded!
+    let req = test::TestRequest::get().uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {bob_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bal["stockBalance"]["sol"]["available"], 5);
+    assert_eq!(bal["usdBalance"]["available"], 1500);
+    assert_eq!(bal["usdBalance"]["locked"], 0, "Unfilled 3 SOL @ $100 ($300) refunded immediately");
+
+    // Verify Bob has NO open/resting orders
+    let req = test::TestRequest::get().uri("/orders/open")
+        .insert_header(("Authorization", format!("Bearer {bob_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let open_orders: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(open_orders["orders"].as_array().unwrap().len(), 0);
+
+    // ── Test FOK (Fill-Or-Kill): Fills when depth is sufficient ──
+    // Alice posts 5 SOL @ $100
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "asset": "sol", "side": "ask", "price": 100, "qty": 5, "time_in_force": "GTC" })).to_request();
+    test::call_service(&app, req).await;
+
+    // Bob sends FOK Limit Bid for 5 SOL @ $100: fills completely!
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "order_type": "limit",
+            "price": 100,
+            "qty": 5,
+            "time_in_force": "FOK"
+        })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let fok_resp2: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(fok_resp2["status"], "filled");
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    engine_handle.abort();
+}
+
 
 
 

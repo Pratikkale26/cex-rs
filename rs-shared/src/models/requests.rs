@@ -32,18 +32,29 @@ pub enum OrderType {
     Market,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum TimeInForce {
+    #[default]
+    Gtc,
+    Ioc,
+    Fok,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct OrderMsg {
-    pub user_id:      u64,
-    pub asset:        String,
-    pub side:         String, // "bid" | "ask"
-    #[serde(default)] // it will make Limit as default if missing
-    pub order_type:   OrderType, // "limit" | "market"
-    pub price:        i64,
-    pub qty:          i64,
-    pub slippage_pct: Option<f64>,
-    pub queue_id:     String,
-    pub identifier:   String,
+    pub user_id:        u64,
+    pub asset:          String,
+    pub side:           String, // "bid" | "ask"
+    #[serde(default)]   // it will make Limit as default if missing
+    pub order_type:     OrderType, // "limit" | "market"
+    pub price:          i64,
+    pub qty:            i64,
+    pub slippage_pct:   Option<f64>,
+    #[serde(default)]
+    pub time_in_force:  TimeInForce, 
+    pub queue_id:       String,
+    pub identifier:     String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

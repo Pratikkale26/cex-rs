@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use rs_engine::orderbook::{Orderbook, Side};
+use rs_engine::orderbook::{Orderbook, Side, TimeInForce};
 
 /// Benchmark inserting non-crossing resting limit orders into the orderbook.
 fn bench_resting_order_placement(c: &mut Criterion) {
@@ -14,7 +14,7 @@ fn bench_resting_order_placement(c: &mut Criterion) {
                 for i in 1..=NUM_ORDERS {
                     // Descending bid prices: none will cross
                     let price = 10_000 - (i % 500);
-                    let _ = black_box(book.add_order(i, Side::Bid, price, 10));
+                    let _ = black_box(book.add_order(i, Side::Bid, price, 10, TimeInForce::Gtc));
                 }
             },
             criterion::BatchSize::SmallInput,
@@ -36,13 +36,13 @@ fn bench_order_matching(c: &mut Criterion) {
                 let mut book = Orderbook::new("SOL_USD");
                 // Pre-populate with 1,000 resting asks at price 100
                 for i in 1..=NUM_MAKERS {
-                    let _ = book.add_order(i, Side::Ask, 100, 1);
+                    let _ = book.add_order(i, Side::Ask, 100, 1, TimeInForce::Gtc);
                 }
                 book
             },
             |mut book| {
                 // One large taker order that matches all 1,000 resting asks
-                let results = book.add_order(99_999, Side::Bid, 100, NUM_MAKERS);
+                let results = book.add_order(99_999, Side::Bid, 100, NUM_MAKERS, TimeInForce::Gtc);
                 black_box(results).unwrap()
             },
             criterion::BatchSize::SmallInput,
@@ -63,7 +63,7 @@ fn bench_order_cancellation(c: &mut Criterion) {
             || {
                 let mut book = Orderbook::new("SOL_USD");
                 for i in 1..=NUM_ORDERS {
-                    let _ = book.add_order(i, Side::Bid, 500 + (i % 100), 5);
+                    let _ = book.add_order(i, Side::Bid, 500 + (i % 100), 5, TimeInForce::Gtc);
                 }
                 book
             },

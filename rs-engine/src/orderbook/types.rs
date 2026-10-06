@@ -1,6 +1,7 @@
 //! Core domain types for the order book and trade execution.
 
 use serde::{Deserialize, Serialize};
+pub use rs_shared::TimeInForce;
 
 pub type UserId   = u64;
 pub type OrderId  = u64;
