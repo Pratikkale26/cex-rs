@@ -442,3 +442,35 @@ pub async fn handle_get_open_orders(
         orders,
     }).await;
 }
+
+pub async fn handle_get_order_status(
+    state:     &EngineState,
+    publisher: Option<&mut redis::aio::MultiplexedConnection>,
+    msg:       OrderStatusQueryMsg,
+) {
+    if let Some(order) = state.sol_orderbook.get_order(msg.order_id)
+        && order.user_id == msg.user_id
+    {
+        let info = OpenOrderInfo {
+            order_id:      order.order_id,
+            user_id:       order.user_id,
+            side:          match order.side { Side::Bid => "bid", Side::Ask => "ask" }.to_string(),
+            price:         order.price,
+            remaining_qty: order.remaining_qty,
+        };
+        reply(publisher, &msg.queue_id, &OrderStatusReply {
+            identifier: msg.identifier,
+            order:      Some(info),
+            status:     Some("open".to_string()),
+            error:      None,
+        }).await;
+        return;
+    }
+
+    reply(publisher, &msg.queue_id, &OrderStatusReply {
+        identifier: msg.identifier,
+        order:      None,
+        status:     None,
+        error:      Some("Order not found in open book".to_string()),
+    }).await;
+}

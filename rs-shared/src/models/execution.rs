@@ -39,6 +39,22 @@ pub enum ExecutionEvent {
     },
 }
 
+/// Order record returned by API endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderRecord {
+    pub id:             i64,
+    pub user_id:        i64,
+    pub market:         String,
+    pub side:           String,
+    pub price:          i64,
+    pub original_qty:   i64,
+    pub remaining_qty:  i64,
+    pub status:         String,
+    pub created_at:     chrono::DateTime<chrono::Utc>,
+    pub updated_at:     chrono::DateTime<chrono::Utc>,
+}
+
 /// Trade history record returned by API endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

@@ -80,6 +80,11 @@ pub async fn dispatch_event(
                 handlers::handle_get_open_orders(state, publisher, msg).await;
             }
         }
+        CH_ORDER_STATUS => {
+            if let Ok(msg) = serde_json::from_str::<OrderStatusQueryMsg>(data) {
+                handlers::handle_get_order_status(state, publisher, msg).await;
+            }
+        }
         CH_RESET => {
             if let Ok(msg) = serde_json::from_str::<ResetMsg>(data) {
                 handlers::handle_reset(state, publisher, msg).await;

@@ -41,6 +41,15 @@ pub struct OpenOrdersReply {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderStatusReply {
+    pub identifier: String,
+    pub order:      Option<OpenOrderInfo>,
+    pub status:     Option<String>,
+    pub error:      Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct OrderbookReply {
     pub identifier: String,
     pub orderbook:  OrderbookData,

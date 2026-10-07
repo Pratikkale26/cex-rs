@@ -1069,6 +1069,136 @@ async fn test_time_in_force_gtc_ioc_and_fok_policies() {
     engine_handle.abort();
 }
 
+#[serial]
+#[actix_web::test]
+async fn test_order_status_endpoint() {
+    let (app_state, engine_handle) = match setup_app_state().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .wrap(rate_limit::RateLimitMiddleware::default())
+            .configure(routes::configure)
+    ).await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Sign up Alice and Bob
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "alice_status", "password": "Password@123" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "alice_status", "password": "Password@123" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let alice_token = body["token"].as_str().unwrap().to_string();
+
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "bob_status", "password": "Password@123" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "bob_status", "password": "Password@123" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    let bob_token = body["token"].as_str().unwrap().to_string();
+
+    // 3. Fund Alice with 10 SOL and Bob with $1000 USD
+    let req = test::TestRequest::post().uri("/deposit/sol")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "qty": 10 })).to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post().uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 1000 })).to_request();
+    test::call_service(&app, req).await;
+
+    // 4. Alice posts resting Ask: 10 SOL @ $100
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "asset": "sol", "side": "ask", "price": 100, "qty": 10 })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let order_resp: serde_json::Value = test::read_body_json(resp).await;
+    let alice_order_id = order_resp["orderId"].as_u64().expect("orderId expected");
+
+    // 5. Query Alice's order status immediately via GET /order/:id
+    let req = test::TestRequest::get().uri(&format!("/order/{alice_order_id}"))
+        .insert_header(("Authorization", format!("Bearer {alice_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let status_resp: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(status_resp["order"]["id"], alice_order_id);
+    assert_eq!(status_resp["order"]["side"], "ask");
+    assert_eq!(status_resp["order"]["price"], 100);
+    assert_eq!(status_resp["order"]["remainingQty"], 10);
+    assert_eq!(status_resp["order"]["status"], "open");
+    assert_eq!(status_resp["trades"].as_array().unwrap().len(), 0);
+
+    // 6. Bob tries to query Alice's order -> Unauthorized / 404
+    let req = test::TestRequest::get().uri(&format!("/order/{alice_order_id}"))
+        .insert_header(("Authorization", format!("Bearer {bob_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 7. Non-existent order ID -> 404
+    let req = test::TestRequest::get().uri("/order/999999")
+        .insert_header(("Authorization", format!("Bearer {alice_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 8. Bob buys 4 SOL @ $100 (partially fills Alice's order)
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "asset": "sol", "side": "bid", "price": 100, "qty": 4 })).to_request();
+    test::call_service(&app, req).await;
+
+    // Allow cold-path execution worker to persist trade & order updates into DB
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 9. Query Alice's order again: should be "partially_filled", remainingQty 6, with 1 trade fill!
+    let req = test::TestRequest::get().uri(&format!("/order/{alice_order_id}"))
+        .insert_header(("Authorization", format!("Bearer {alice_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let updated_status: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(updated_status["order"]["remainingQty"], 6);
+    assert_eq!(updated_status["order"]["status"], "partially_filled");
+    let trades = updated_status["trades"].as_array().unwrap();
+    assert_eq!(trades.len(), 1);
+    assert_eq!(trades[0]["price"], 100);
+    assert_eq!(trades[0]["qty"], 4);
+    assert_eq!(trades[0]["quoteAmount"], 400);
+
+    // 10. Alice cancels the remainder: DELETE /order/:id
+    let req = test::TestRequest::delete().uri(&format!("/order/{alice_order_id}"))
+        .insert_header(("Authorization", format!("Bearer {alice_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Allow cold-path worker to persist cancellation
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 11. Query Alice's order again: status should now be "cancelled"!
+    let req = test::TestRequest::get().uri(&format!("/order/{alice_order_id}"))
+        .insert_header(("Authorization", format!("Bearer {alice_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cancelled_status: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(cancelled_status["order"]["status"], "cancelled");
+    assert_eq!(cancelled_status["order"]["remainingQty"], 6);
+    assert_eq!(cancelled_status["trades"].as_array().unwrap().len(), 1);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    engine_handle.abort();
+}
+
 
 
 

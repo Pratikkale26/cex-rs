@@ -21,6 +21,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/ledger", web::get().to(ledger::get_ledger))
         // Orders & Trading routes (Bearer auth)
         .route("/order", web::post().to(orders::place_order))
+        .route("/order/{order_id}", web::get().to(orders::get_order))
         .route("/order/{order_id}", web::delete().to(orders::cancel_order))
         .route("/orders/open", web::get().to(orders::get_open_orders))
         .route("/trades/my", web::get().to(trades::get_my_trades))

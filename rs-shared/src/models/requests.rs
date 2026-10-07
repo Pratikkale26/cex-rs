@@ -87,6 +87,14 @@ pub struct OpenOrdersQueryMsg {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OrderStatusQueryMsg {
+    pub user_id:    u64,
+    pub order_id:   u64,
+    pub queue_id:   String,
+    pub identifier: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ResetMsg {
     pub queue_id:   String,
     pub identifier: String,
