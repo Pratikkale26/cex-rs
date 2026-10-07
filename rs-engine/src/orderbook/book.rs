@@ -214,6 +214,7 @@ impl Orderbook {
                         qty:            fill_qty,
                         taker_order_id: order_id,
                         maker_order_id: maker_id,
+                        taker_side:     Side::Bid,
                     },
                     Side::Ask => Trade {
                         buyer:          maker_user_id,
@@ -222,6 +223,7 @@ impl Orderbook {
                         qty:            fill_qty,
                         taker_order_id: order_id,
                         maker_order_id: maker_id,
+                        taker_side:     Side::Ask,
                     },
                 };
                 results.push(MatchResult::Trade(trade));
@@ -406,6 +408,7 @@ impl Orderbook {
                         qty:            fill_qty,
                         taker_order_id: order_id,
                         maker_order_id: maker_id,
+                        taker_side:     Side::Bid,
                     },
                     Side::Ask => Trade {
                         buyer:          maker_user_id,
@@ -414,6 +417,7 @@ impl Orderbook {
                         qty:            fill_qty,
                         taker_order_id: order_id,
                         maker_order_id: maker_id,
+                        taker_side:     Side::Ask,
                     },
                 };
                 results.push(MatchResult::Trade(trade));

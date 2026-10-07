@@ -121,6 +121,8 @@ async fn run_worker(client: redis::Client, db_pool: PgPool) {
                         quote_amount,
                         maker_remaining_qty,
                         taker_remaining_qty: _,
+                        buyer_fee,
+                        seller_fee,
                     } => {
                         // 1. Record trade
                         let _ = sqlx::query(
@@ -158,7 +160,8 @@ async fn run_worker(client: redis::Client, db_pool: PgPool) {
                         // 3. Double-entry ledger entries for trade:
                         let trade_ref = format!("{}-{}", maker_order_id, taker_order_id);
 
-                        // Buyer: -quote_amount USD (debit from locked), +qty SOL (credit to available)
+                        // Buyer: -(quote_amount + buyer_fee) USD (debit from locked), +qty SOL (credit to available)
+                        let buyer_usd_deduction = (quote_amount + buyer_fee) as i64;
                         let _ = sqlx::query(
                             r#"
                             INSERT INTO ledger_entries (user_id, currency, amount, balance_type, operation_type, reference_id)
@@ -167,13 +170,14 @@ async fn run_worker(client: redis::Client, db_pool: PgPool) {
                             "#
                         )
                         .bind(buyer_id as i64)
-                        .bind(-(quote_amount as i64))
+                        .bind(-buyer_usd_deduction)
                         .bind(&trade_ref)
                         .bind(qty as i64)
                         .execute(&mut *tx)
                         .await;
 
-                        // Seller: +quote_amount USD (credit to available), -qty SOL (debit from locked)
+                        // Seller: +(quote_amount - seller_fee) USD (credit to available), -qty SOL (debit from locked)
+                        let seller_usd_credit = (quote_amount.saturating_sub(seller_fee)) as i64;
                         let _ = sqlx::query(
                             r#"
                             INSERT INTO ledger_entries (user_id, currency, amount, balance_type, operation_type, reference_id)
@@ -182,11 +186,26 @@ async fn run_worker(client: redis::Client, db_pool: PgPool) {
                             "#
                         )
                         .bind(seller_id as i64)
-                        .bind(quote_amount as i64)
+                        .bind(seller_usd_credit)
                         .bind(&trade_ref)
                         .bind(-(qty as i64))
                         .execute(&mut *tx)
                         .await;
+
+                        // 4. Exchange Treasury (user_id = 0) collects fees:
+                        let total_fee = (buyer_fee + seller_fee) as i64;
+                        if total_fee > 0 {
+                            let _ = sqlx::query(
+                                r#"
+                                INSERT INTO ledger_entries (user_id, currency, amount, balance_type, operation_type, reference_id)
+                                VALUES (0, 'USD', $1, 'available', 'fee_collection', $2)
+                                "#
+                            )
+                            .bind(total_fee)
+                            .bind(&trade_ref)
+                            .execute(&mut *tx)
+                            .await;
+                        }
                     }
                     ExecutionEvent::OrderCancelled {
                         order_id,

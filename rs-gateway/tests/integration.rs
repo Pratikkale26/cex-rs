@@ -4,6 +4,7 @@
 use actix_web::{http::StatusCode, test, web, App};
 use rs_gateway::state::AppState;
 use rs_gateway::*;
+use rs_shared::*;
 use serial_test::serial;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1196,6 +1197,179 @@ async fn test_order_status_endpoint() {
     assert_eq!(cancelled_status["trades"].as_array().unwrap().len(), 1);
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    engine_handle.abort();
+}
+
+#[serial]
+#[actix_web::test]
+async fn test_maker_taker_fee_schedules_and_treasury_accounting() {
+    let (app_state, engine_handle, db_pool, _client, engine_state) = match setup_test_env().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .wrap(rate_limit::RateLimitMiddleware::default())
+            .configure(routes::configure),
+    )
+    .await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Configure fee schedule: 10 bps maker fee (0.10%), 20 bps taker fee (0.20%)
+    engine_state.lock().await.fee_schedule = FeeSchedule::new(10, 20);
+
+    // 3. Sign up and sign in Alice (buyer)
+    let req = test::TestRequest::post()
+        .uri("/signup")
+        .set_json(serde_json::json!({
+            "username": "fee_alice",
+            "password": "Password123!"
+        }))
+        .to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post()
+        .uri("/signin")
+        .set_json(serde_json::json!({
+            "username": "fee_alice",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let alice_login: serde_json::Value = test::read_body_json(resp).await;
+    let alice_token = alice_login["token"].as_str().unwrap();
+
+    // 4. Sign up and sign in Bob (seller)
+    let req = test::TestRequest::post()
+        .uri("/signup")
+        .set_json(serde_json::json!({
+            "username": "fee_bob",
+            "password": "Password123!"
+        }))
+        .to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post()
+        .uri("/signin")
+        .set_json(serde_json::json!({
+            "username": "fee_bob",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bob_login: serde_json::Value = test::read_body_json(resp).await;
+    let bob_token = bob_login["token"].as_str().unwrap();
+
+    // 5. Fund Alice: Onramp $2,000 USD
+    let req = test::TestRequest::post()
+        .uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "qty": 2000 }))
+        .to_request();
+    test::call_service(&app, req).await;
+
+    // 6. Fund Bob: Onramp $500 USD and Deposit 10 SOL
+    let req = test::TestRequest::post()
+        .uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 500 }))
+        .to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post()
+        .uri("/deposit/sol")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 10 }))
+        .to_request();
+    test::call_service(&app, req).await;
+
+    // 7. Bob places Maker Ask: 10 SOL @ $100
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "ask",
+            "price": 100,
+            "qty": 10
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 8. Alice places Taker Bid: 10 SOL @ $100
+    // Trade quote value = 10 * 100 = $1,000.
+    // Buyer (Alice, Taker): pays $1,000 + 20 bps ($2) = $1,002.
+    // Seller (Bob, Maker): receives $1,000 - 10 bps ($1) = $999.
+    // Exchange Treasury (user_id = 0): receives $2 + $1 = $3.
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({
+            "asset": "sol",
+            "side": "bid",
+            "price": 100,
+            "qty": 10
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 9. Check Alice's live balance:
+    // Started with $2,000 USD. Deducted $1,002 -> $998 available USD, 10 available SOL.
+    let req = test::TestRequest::get().uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {alice_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let alice_bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(alice_bal["usdBalance"]["available"], 998);
+    assert_eq!(alice_bal["usdBalance"]["locked"], 0);
+    assert_eq!(alice_bal["stockBalance"]["sol"]["available"], 10);
+
+    // 10. Check Bob's live balance:
+    // Started with $500 USD + 10 SOL. Received $999 USD, sold 10 SOL -> $1,499 available USD, 0 SOL.
+    let req = test::TestRequest::get().uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {bob_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let bob_bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bob_bal["usdBalance"]["available"], 1499);
+    assert_eq!(bob_bal["usdBalance"]["locked"], 0);
+    assert_eq!(bob_bal["stockBalance"]["sol"]["available"], 0);
+
+    // 11. Allow cold-path worker to persist DB records
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 12. Check Treasury fee entry in PostgreSQL ledger
+    let treasury_fee: Option<i64> = sqlx::query_scalar(
+        "SELECT amount FROM ledger_entries WHERE user_id = 0 AND operation_type = 'fee_collection'"
+    )
+    .fetch_optional(&db_pool)
+    .await
+    .unwrap();
+    assert_eq!(treasury_fee, Some(3), "Treasury (user_id = 0) must have received $3 in fees");
+
+    // 13. Mathematical verification of zero-sum double-entry ledger conservation invariant
+    let usd_sum: Option<i64> = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)::BIGINT FROM ledger_entries WHERE currency = 'USD'"
+    )
+    .fetch_one(&db_pool)
+    .await
+    .unwrap();
+    assert_eq!(usd_sum, Some(0), "Total USD ledger sum must be exactly 0");
+
+    let sol_sum: Option<i64> = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount), 0)::BIGINT FROM ledger_entries WHERE currency = 'SOL'"
+    )
+    .fetch_one(&db_pool)
+    .await
+    .unwrap();
+    assert_eq!(sol_sum, Some(0), "Total SOL ledger sum must be exactly 0");
+
     engine_handle.abort();
 }
 

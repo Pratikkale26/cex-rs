@@ -29,6 +29,7 @@ pub struct Trade {
     pub qty:            Quantity,
     pub taker_order_id: OrderId,
     pub maker_order_id: OrderId,
+    pub taker_side:     Side,
 }
 
 /// A resting (unmatched) portion of an incoming order.

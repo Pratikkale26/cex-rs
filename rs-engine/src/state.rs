@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use rs_shared::Balance;
+use rs_shared::{Balance, FeeSchedule};
 use crate::orderbook::Orderbook;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +18,10 @@ pub struct EngineState {
 
     /// The SOL/USD orderbook (the only market we support for now).
     pub sol_orderbook: Orderbook,
+
+    /// Fee schedule for maker and taker fees.
+    #[serde(default)]
+    pub fee_schedule: FeeSchedule,
 }
 
 impl EngineState {
@@ -26,7 +30,13 @@ impl EngineState {
             usd_balance:   HashMap::new(),
             stock_balance: HashMap::new(),
             sol_orderbook: Orderbook::new("SOL-USDT"),
+            fee_schedule:  FeeSchedule::from_env(),
         }
+    }
+
+    pub fn with_fee_schedule(mut self, fee_schedule: FeeSchedule) -> Self {
+        self.fee_schedule = fee_schedule;
+        self
     }
 }
 
