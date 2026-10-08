@@ -7,16 +7,19 @@ pub async fn handle_get_orderbook(
     publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OrderbookQueryMsg,
 ) {
-    if msg.asset != "sol" {
-        // Unsupported asset — return empty book.
-        reply(publisher, &msg.queue_id, &OrderbookReply {
-            identifier: msg.identifier,
-            orderbook:  OrderbookData { bids: vec![], asks: vec![] },
-        }).await;
-        return;
-    }
+    let ob = match state.get_orderbook(&msg.asset) {
+        Some(b) => b,
+        None => {
+            // Unsupported asset — return empty book.
+            reply(publisher, &msg.queue_id, &OrderbookReply {
+                identifier: msg.identifier,
+                orderbook:  OrderbookData { bids: vec![], asks: vec![] },
+            }).await;
+            return;
+        }
+    };
 
-    let snap = state.sol_orderbook.get_state();
+    let snap = ob.get_state();
 
     let bids = snap.bids.into_iter()
         .map(|l| OrderbookLevel { price: l.price, qty: l.qty })

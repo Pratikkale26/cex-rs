@@ -66,10 +66,17 @@ pub async fn deposit(
     }
 
     let asset = path.into_inner();
+    let asset_lower = asset.to_lowercase();
+    if !matches!(asset_lower.as_str(), "sol" | "btc" | "eth") {
+        return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+            "message": "Supported assets are SOL, BTC, ETH"
+        })));
+    }
+
     let identifier = uuid::Uuid::new_v4().to_string();
     let msg = DepositMsg {
         user_id: auth.0,
-        symbol: asset,
+        symbol: asset_lower,
         qty: body.qty,
         queue_id: state.queue_id.clone(),
         identifier: identifier.clone(),

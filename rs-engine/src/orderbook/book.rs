@@ -55,6 +55,7 @@ impl Orderbook {
     pub fn order_count(&self) -> usize { self.orders.len() }
     pub fn bid_levels(&self)  -> usize { self.bids.len()   }
     pub fn ask_levels(&self)  -> usize { self.asks.len()   }
+    pub fn symbol(&self)      -> &str  { &self.symbol      }
 
     pub fn get_order(&self, order_id: OrderId) -> Option<&Order> {
         self.orders.get(&order_id)
@@ -152,15 +153,29 @@ impl Orderbook {
         qty:           Quantity,
         time_in_force: TimeInForce,
     ) -> Result<Vec<MatchResult>, OrderbookError> {
+        let order_id = self.next_order_id;
+        self.next_order_id += 1;
+        self.add_order_with_id(order_id, user_id, side, price, qty, time_in_force)
+    }
+
+    /// Place an order with an explicitly provided OrderId.
+    pub fn add_order_with_id(
+        &mut self,
+        order_id:      OrderId,
+        user_id:       UserId,
+        side:          Side,
+        price:         Price,
+        qty:           Quantity,
+        time_in_force: TimeInForce,
+    ) -> Result<Vec<MatchResult>, OrderbookError> {
+        self.next_order_id = self.next_order_id.max(order_id + 1);
+
         if price == 0 { return Err(OrderbookError::InvalidPrice);    }
         if qty   == 0 { return Err(OrderbookError::InvalidQuantity); }
 
         if time_in_force == TimeInForce::Fok && !self.can_fill_quantity(side, price, qty) {
             return Ok(Vec::new());
         }
-
-        let order_id       = self.next_order_id;
-        self.next_order_id += 1;
 
         let mut remaining_qty = qty;
         let mut results       = Vec::new();
@@ -350,10 +365,23 @@ impl Orderbook {
         qty:     Quantity,
         worst_price: Option<Price>,
     ) -> Result<Vec<MatchResult>, OrderbookError> {
-        if qty == 0 { return Err(OrderbookError::InvalidQuantity); }
-
-        let order_id       = self.next_order_id;
+        let order_id = self.next_order_id;
         self.next_order_id += 1;
+        self.execute_market_order_with_id(order_id, user_id, side, qty, worst_price)
+    }
+
+    /// Execute a market order with an explicitly provided OrderId.
+    pub fn execute_market_order_with_id(
+        &mut self,
+        order_id:    OrderId,
+        user_id:     UserId,
+        side:        Side,
+        qty:         Quantity,
+        worst_price: Option<Price>,
+    ) -> Result<Vec<MatchResult>, OrderbookError> {
+        self.next_order_id = self.next_order_id.max(order_id + 1);
+
+        if qty == 0 { return Err(OrderbookError::InvalidQuantity); }
 
         let mut remaining_qty = qty;
         let mut results       = Vec::new();

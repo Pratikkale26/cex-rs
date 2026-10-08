@@ -8,9 +8,10 @@ pub async fn get_orderbook(
     path: web::Path<String>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let asset = path.into_inner();
-    if asset != "sol" {
+    let asset_lower = asset.to_lowercase();
+    if !matches!(asset_lower.as_str(), "sol" | "btc" | "eth") {
         return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-            "message": "Only SOL is supported"
+            "message": "Supported assets are SOL, BTC, ETH"
         })));
     }
 

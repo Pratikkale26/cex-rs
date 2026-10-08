@@ -8,12 +8,14 @@ pub async fn handle_order(
     mut publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OrderMsg,
 ) {
-    // Only SOL is supported.
-    if msg.asset != "sol" {
+    // Validate asset.
+    let asset = msg.asset.to_lowercase();
+    if !matches!(asset.as_str(), "sol" | "btc" | "eth") {
         reply_error(publisher, &msg.queue_id, &msg.identifier,
-                    "Only SOL orders are supported", 400).await;
+                    "Supported assets are SOL, BTC, ETH", 400).await;
         return;
     }
+    let market = format!("{}_USD", asset.to_uppercase());
 
     let side = match msg.side.as_str() {
         "bid" => Side::Bid,
@@ -59,19 +61,22 @@ pub async fn handle_order(
                     usd.locked    += total_lock;
                 }
                 Side::Ask => {
-                    let sol = state.sol_mut(msg.user_id);
-                    if sol.available < qty {
+                    let base_bal = state.asset_mut(msg.user_id, &asset);
+                    if base_bal.available < qty {
                         reply_error(publisher, &msg.queue_id, &msg.identifier,
-                                    "Insufficient SOL", 400).await;
+                                    &format!("Insufficient {}", asset.to_uppercase()), 400).await;
                         return;
                     }
-                    sol.available -= qty;
-                    sol.locked    += qty;
+                    base_bal.available -= qty;
+                    base_bal.locked    += qty;
                 }
             }
 
             // ── Place limit order ─────────────────────────────────────────
-            let results = state.sol_orderbook.add_order(msg.user_id, side, price, qty, msg.time_in_force)
+            let order_id = state.next_order_id();
+            let results = state.get_orderbook_mut(&asset)
+                .expect("asset validated above")
+                .add_order_with_id(order_id, msg.user_id, side, price, qty, msg.time_in_force)
                 .expect("price/qty already validated above");
 
             let mut resting_order: Option<crate::orderbook::OrderAccepted> = None;
@@ -81,13 +86,14 @@ pub async fn handle_order(
             for result in results {
                 match result {
                     MatchResult::Trade(trade) => {
-                        let (buyer_fee, seller_fee) = apply_fill(state, &trade);
+                        let (buyer_fee, seller_fee) = apply_fill(state, &asset, &trade);
                         filled_qty += trade.qty;
                         if side == Side::Bid {
                             buyer_total_deducted += (trade.price * trade.qty) + buyer_fee;
                         }
 
-                        let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
+                        let maker_rem = state.get_orderbook(&asset)
+                            .and_then(|ob| ob.get_order(trade.maker_order_id))
                             .map(|o| o.remaining_qty)
                             .unwrap_or(0);
 
@@ -96,7 +102,7 @@ pub async fn handle_order(
                             taker_order_id:      trade.taker_order_id,
                             buyer_id:            trade.buyer,
                             seller_id:           trade.seller,
-                            market:              "SOL_USD".to_string(),
+                            market:              market.clone(),
                             price:               trade.price,
                             qty:                 trade.qty,
                             quote_amount:        trade.price * trade.qty,
@@ -131,9 +137,9 @@ pub async fn handle_order(
                 Side::Ask => {
                     let unfilled_qty = qty - filled_qty;
                     if msg.time_in_force != TimeInForce::Gtc && unfilled_qty > 0 {
-                        let sol = state.sol_mut(msg.user_id);
-                        sol.locked -= unfilled_qty;
-                        sol.available += unfilled_qty;
+                        let base_bal = state.asset_mut(msg.user_id, &asset);
+                        base_bal.locked -= unfilled_qty;
+                        base_bal.available += unfilled_qty;
                     }
                 }
             }
@@ -143,7 +149,7 @@ pub async fn handle_order(
                     emit_execution(publisher.as_deref_mut(), &ExecutionEvent::OrderCreated {
                         order_id:      acc.order_id,
                         user_id:       acc.user_id,
-                        market:        "SOL_USD".to_string(),
+                        market:        market.clone(),
                         side:          msg.side.clone(),
                         price:         acc.price,
                         original_qty:  qty,
@@ -181,7 +187,7 @@ pub async fn handle_order(
                 Side::Ask => {
                     let worst_price = if msg.price > 0 {
                         Some(msg.price as u64)
-                    } else if let Some(best_bid) = state.sol_orderbook.best_bid() {
+                    } else if let Some(best_bid) = state.get_orderbook(&asset).and_then(|ob| ob.best_bid()) {
                         let floor = (best_bid as f64 * (1.0 - slippage / 100.0)).floor() as u64;
                         Some(floor.max(1))
                     } else {
@@ -190,7 +196,9 @@ pub async fn handle_order(
 
                     // If FOK, check that entire qty can be filled within slippage:
                     if msg.time_in_force == TimeInForce::Fok {
-                        let fillable = state.sol_orderbook.fillable_qty_for_market_sell(qty, worst_price);
+                        let fillable = state.get_orderbook(&asset)
+                            .map(|ob| ob.fillable_qty_for_market_sell(qty, worst_price))
+                            .unwrap_or(0);
                         if fillable < qty {
                             reply(publisher, &msg.queue_id, &OrderReply {
                                 identifier:  msg.identifier,
@@ -203,26 +211,30 @@ pub async fn handle_order(
                         }
                     }
 
-                    // Market Sell: Lock `qty` SOL upfront.
-                    let sol = state.sol_mut(msg.user_id);
-                    if sol.available < qty {
+                    // Market Sell: Lock `qty` base asset upfront.
+                    let base_bal = state.asset_mut(msg.user_id, &asset);
+                    if base_bal.available < qty {
                         reply_error(publisher, &msg.queue_id, &msg.identifier,
-                                    "Insufficient SOL", 400).await;
+                                    &format!("Insufficient {}", asset.to_uppercase()), 400).await;
                         return;
                     }
-                    sol.available -= qty;
-                    sol.locked    += qty;
+                    base_bal.available -= qty;
+                    base_bal.locked    += qty;
 
-                    let results = state.sol_orderbook.execute_market_order(msg.user_id, side, qty, worst_price)
+                    let order_id = state.next_order_id();
+                    let results = state.get_orderbook_mut(&asset)
+                        .expect("asset validated above")
+                        .execute_market_order_with_id(order_id, msg.user_id, side, qty, worst_price)
                         .expect("qty validated");
 
                     let mut filled_qty = 0_u64;
                     for result in results {
                         if let MatchResult::Trade(trade) = result {
-                            let (buyer_fee, seller_fee) = apply_fill(state, &trade);
+                            let (buyer_fee, seller_fee) = apply_fill(state, &asset, &trade);
                             filled_qty += trade.qty;
 
-                            let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
+                            let maker_rem = state.get_orderbook(&asset)
+                                .and_then(|ob| ob.get_order(trade.maker_order_id))
                                 .map(|o| o.remaining_qty)
                                 .unwrap_or(0);
 
@@ -231,7 +243,7 @@ pub async fn handle_order(
                                 taker_order_id:      trade.taker_order_id,
                                 buyer_id:            trade.buyer,
                                 seller_id:           trade.seller,
-                                market:              "SOL_USD".to_string(),
+                                market:              market.clone(),
                                 price:               trade.price,
                                 qty:                 trade.qty,
                                 quote_amount:        trade.price * trade.qty,
@@ -243,12 +255,12 @@ pub async fn handle_order(
                         }
                     }
 
-                    // Refund unsold SOL if book liquidity ran out or slippage limit was hit
+                    // Refund unsold base asset if book liquidity ran out or slippage limit was hit
                     let unfilled_qty = qty - filled_qty;
                     if unfilled_qty > 0 {
-                        let sol = state.sol_mut(msg.user_id);
-                        sol.locked    -= unfilled_qty;
-                        sol.available += unfilled_qty;
+                        let base_bal = state.asset_mut(msg.user_id, &asset);
+                        base_bal.locked    -= unfilled_qty;
+                        base_bal.available += unfilled_qty;
                     }
 
                     let status = if filled_qty == qty {
@@ -271,7 +283,7 @@ pub async fn handle_order(
                 Side::Bid => {
                     let worst_price = if msg.price > 0 {
                         Some(msg.price as u64)
-                    } else if let Some(best_ask) = state.sol_orderbook.best_ask() {
+                    } else if let Some(best_ask) = state.get_orderbook(&asset).and_then(|ob| ob.best_ask()) {
                         let cap = (best_ask as f64 * (1.0 + slippage / 100.0)).ceil() as u64;
                         Some(cap)
                     } else {
@@ -279,7 +291,9 @@ pub async fn handle_order(
                     };
 
                     // Market Buy: Calculate required USD from available ask liquidity within slippage.
-                    let (required_usd, fillable_qty) = state.sol_orderbook.quote_cost_for_market_buy(qty, worst_price);
+                    let (required_usd, fillable_qty) = state.get_orderbook(&asset)
+                        .map(|ob| ob.quote_cost_for_market_buy(qty, worst_price))
+                        .unwrap_or((0, 0));
                     if fillable_qty == 0 || (msg.time_in_force == TimeInForce::Fok && fillable_qty < qty) {
                         if msg.time_in_force == TimeInForce::Fok && fillable_qty < qty {
                             reply(publisher, &msg.queue_id, &OrderReply {
@@ -308,7 +322,10 @@ pub async fn handle_order(
                     usd.available -= total_required;
                     usd.locked    += total_required;
 
-                    let results = state.sol_orderbook.execute_market_order(msg.user_id, side, qty, worst_price)
+                    let order_id = state.next_order_id();
+                    let results = state.get_orderbook_mut(&asset)
+                        .expect("asset validated above")
+                        .execute_market_order_with_id(order_id, msg.user_id, side, qty, worst_price)
                         .expect("qty validated");
 
                     let mut filled_qty = 0_u64;
@@ -316,11 +333,12 @@ pub async fn handle_order(
 
                     for result in results {
                         if let MatchResult::Trade(trade) = result {
-                            let (buyer_fee, seller_fee) = apply_fill(state, &trade);
+                            let (buyer_fee, seller_fee) = apply_fill(state, &asset, &trade);
                             filled_qty  += trade.qty;
                             total_spent += (trade.price * trade.qty) + buyer_fee;
 
-                            let maker_rem = state.sol_orderbook.get_order(trade.maker_order_id)
+                            let maker_rem = state.get_orderbook(&asset)
+                                .and_then(|ob| ob.get_order(trade.maker_order_id))
                                 .map(|o| o.remaining_qty)
                                 .unwrap_or(0);
 
@@ -329,7 +347,7 @@ pub async fn handle_order(
                                 taker_order_id:      trade.taker_order_id,
                                 buyer_id:            trade.buyer,
                                 seller_id:           trade.seller,
-                                market:              "SOL_USD".to_string(),
+                                market:              market.clone(),
                                 price:               trade.price,
                                 qty:                 trade.qty,
                                 quote_amount:        trade.price * trade.qty,
@@ -376,7 +394,7 @@ pub async fn handle_order(
 /// always have their payment in `locked` at this point.
 /// Buyer fee is deducted from buyer's locked USD; seller fee is deducted from seller's proceeds.
 /// Both fees are credited to Exchange Treasury (`user_id = 0`) available USD.
-fn apply_fill(state: &mut EngineState, trade: &Trade) -> (u64, u64) {
+fn apply_fill(state: &mut EngineState, asset: &str, trade: &Trade) -> (u64, u64) {
     let value = trade.price * trade.qty;
     let (buyer_fee, seller_fee) = match trade.taker_side {
         Side::Bid => (
@@ -389,13 +407,13 @@ fn apply_fill(state: &mut EngineState, trade: &Trade) -> (u64, u64) {
         ),
     };
 
-    // Buyer: pays USD (value + buyer_fee from locked), receives SOL (into available).
-    state.usd_mut(trade.buyer).locked          -= value + buyer_fee;
-    state.sol_mut(trade.buyer).available        += trade.qty;
+    // Buyer: pays USD (value + buyer_fee from locked), receives asset (into available).
+    state.usd_mut(trade.buyer).locked             -= value + buyer_fee;
+    state.asset_mut(trade.buyer, asset).available += trade.qty;
 
-    // Seller: gives SOL (from locked), receives USD (value - seller_fee into available).
-    state.sol_mut(trade.seller).locked          -= trade.qty;
-    state.usd_mut(trade.seller).available       += value.saturating_sub(seller_fee);
+    // Seller: gives asset (from locked), receives USD (value - seller_fee into available).
+    state.asset_mut(trade.seller, asset).locked   -= trade.qty;
+    state.usd_mut(trade.seller).available          += value.saturating_sub(seller_fee);
 
     // Treasury (user_id = 0): collects both fees into available USD.
     let total_fee = buyer_fee + seller_fee;
@@ -411,7 +429,24 @@ pub async fn handle_cancel(
     mut publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       CancelMsg,
 ) {
-    match state.sol_orderbook.cancel_order(msg.order_id, msg.user_id) {
+    let cancel_res = if let Ok(c) = state.sol_orderbook.cancel_order(msg.order_id, msg.user_id) {
+        Ok((c, "sol".to_string()))
+    } else if let Ok(c) = state.btc_orderbook.cancel_order(msg.order_id, msg.user_id) {
+        Ok((c, "btc".to_string()))
+    } else if let Ok(c) = state.eth_orderbook.cancel_order(msg.order_id, msg.user_id) {
+        Ok((c, "eth".to_string()))
+    } else {
+        let exists_other_user = state.sol_orderbook.get_order(msg.order_id)
+            .or_else(|| state.btc_orderbook.get_order(msg.order_id))
+            .or_else(|| state.eth_orderbook.get_order(msg.order_id));
+        if exists_other_user.is_some() {
+            Err(OrderbookError::NotOrderOwner)
+        } else {
+            Err(OrderbookError::OrderNotFound)
+        }
+    };
+
+    match cancel_res {
         Err(OrderbookError::OrderNotFound) => {
             reply_cancel_error(publisher, &msg.queue_id, &msg.identifier,
                                "Open order not found").await;
@@ -421,7 +456,7 @@ pub async fn handle_cancel(
                                "Not order owner").await;
         }
         Err(_) => unreachable!("cancel_order only returns the above errors"),
-        Ok(cancelled) => {
+        Ok((cancelled, asset)) => {
             // Refund the locked funds for the remaining (unfilled) qty.
             // locked = remaining_qty * price + maker_fee  (for bids)
             // locked = remaining_qty                       (for asks)
@@ -435,9 +470,9 @@ pub async fn handle_cancel(
                     usd.available += refund;
                 }
                 Side::Ask => {
-                    let sol = state.sol_mut(cancelled.user_id);
-                    sol.locked    -= cancelled.remaining_qty;
-                    sol.available += cancelled.remaining_qty;
+                    let base_bal = state.asset_mut(cancelled.user_id, &asset);
+                    base_bal.locked    -= cancelled.remaining_qty;
+                    base_bal.available += cancelled.remaining_qty;
                 }
             }
 
@@ -463,17 +498,23 @@ pub async fn handle_get_open_orders(
     publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OpenOrdersQueryMsg,
 ) {
-    let orders = state.sol_orderbook
-        .get_user_orders(msg.user_id)
-        .into_iter()
-        .map(|o| OpenOrderInfo {
-            order_id:      o.order_id,
-            user_id:       o.user_id,
-            side:          match o.side { Side::Bid => "bid", Side::Ask => "ask" }.to_string(),
-            price:         o.price,
-            remaining_qty: o.remaining_qty,
-        })
-        .collect();
+    let mut orders: Vec<OpenOrderInfo> = Vec::new();
+    for (ob, market) in [
+        (&state.sol_orderbook, "SOL_USD"),
+        (&state.btc_orderbook, "BTC_USD"),
+        (&state.eth_orderbook, "ETH_USD"),
+    ] {
+        for o in ob.get_user_orders(msg.user_id) {
+            orders.push(OpenOrderInfo {
+                order_id:      o.order_id,
+                user_id:       o.user_id,
+                side:          match o.side { Side::Bid => "bid", Side::Ask => "ask" }.to_string(),
+                price:         o.price,
+                remaining_qty: o.remaining_qty,
+                market:        market.to_string(),
+            });
+        }
+    }
 
     reply(publisher, &msg.queue_id, &OpenOrdersReply {
         identifier: msg.identifier,
@@ -486,15 +527,18 @@ pub async fn handle_get_order_status(
     publisher: Option<&mut redis::aio::MultiplexedConnection>,
     msg:       OrderStatusQueryMsg,
 ) {
-    if let Some(order) = state.sol_orderbook.get_order(msg.order_id)
-        && order.user_id == msg.user_id
-    {
+    let found = state.sol_orderbook.get_order(msg.order_id).map(|o| (o, "SOL_USD"))
+        .or_else(|| state.btc_orderbook.get_order(msg.order_id).map(|o| (o, "BTC_USD")))
+        .or_else(|| state.eth_orderbook.get_order(msg.order_id).map(|o| (o, "ETH_USD")));
+
+    if let Some((order, market)) = found && order.user_id == msg.user_id {
         let info = OpenOrderInfo {
             order_id:      order.order_id,
             user_id:       order.user_id,
             side:          match order.side { Side::Bid => "bid", Side::Ask => "ask" }.to_string(),
             price:         order.price,
             remaining_qty: order.remaining_qty,
+            market:        market.to_string(),
         };
         reply(publisher, &msg.queue_id, &OrderStatusReply {
             identifier: msg.identifier,
@@ -615,6 +659,95 @@ mod tests {
 
         assert_eq!(state.usd_mut(3).available, 1000);
         assert_eq!(state.usd_mut(3).locked, 0);
+    }
+
+    #[tokio::test]
+    async fn test_multi_market_order_handling_and_sequence() {
+        let mut state = EngineState::new();
+
+        // User 1 has 2 BTC, User 2 has 60_000 USD
+        state.btc_mut(1).available = 2;
+        state.usd_mut(2).available = 60_000;
+
+        // User 3 has 10 ETH, User 4 has 30_000 USD
+        state.eth_mut(3).available = 10;
+        state.usd_mut(4).available = 30_000;
+
+        // User 1 places BTC ask @ 30_000 for 1 BTC
+        handle_order(&mut state, None, OrderMsg {
+            user_id: 1,
+            asset: "btc".to_string(),
+            side: "ask".to_string(),
+            price: 30_000,
+            qty: 1,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
+            slippage_pct: None,
+            queue_id: "q".to_string(),
+            identifier: "btc_ask".to_string(),
+        }).await;
+
+        // User 3 places ETH ask @ 3_000 for 5 ETH
+        handle_order(&mut state, None, OrderMsg {
+            user_id: 3,
+            asset: "eth".to_string(),
+            side: "ask".to_string(),
+            price: 3_000,
+            qty: 5,
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
+            slippage_pct: None,
+            queue_id: "q".to_string(),
+            identifier: "eth_ask".to_string(),
+        }).await;
+
+        let btc_orders = state.btc_orderbook.get_user_orders(1);
+        let eth_orders = state.eth_orderbook.get_user_orders(3);
+
+        assert_eq!(btc_orders.len(), 1);
+        assert_eq!(eth_orders.len(), 1);
+
+        // Verify monotonic order IDs across different books
+        let btc_order_id = btc_orders[0].order_id;
+        let eth_order_id = eth_orders[0].order_id;
+        assert_ne!(btc_order_id, eth_order_id);
+        assert!(eth_order_id > btc_order_id);
+
+        // User 2 market buys 1 BTC
+        handle_order(&mut state, None, OrderMsg {
+            user_id: 2,
+            asset: "btc".to_string(),
+            side: "bid".to_string(),
+            price: 0,
+            qty: 1,
+            order_type: OrderType::Market,
+            time_in_force: TimeInForce::Ioc,
+            slippage_pct: None,
+            queue_id: "q".to_string(),
+            identifier: "btc_market_buy".to_string(),
+        }).await;
+
+        assert_eq!(state.btc_mut(2).available, 1);
+        assert_eq!(state.usd_mut(2).available, 30_000);
+        assert_eq!(state.usd_mut(1).available, 30_000);
+
+        // User 4 market buys 5 ETH
+        handle_order(&mut state, None, OrderMsg {
+            user_id: 4,
+            asset: "eth".to_string(),
+            side: "bid".to_string(),
+            price: 0,
+            qty: 5,
+            order_type: OrderType::Market,
+            time_in_force: TimeInForce::Ioc,
+            slippage_pct: None,
+            queue_id: "q".to_string(),
+            identifier: "eth_market_buy".to_string(),
+        }).await;
+
+        assert_eq!(state.eth_mut(4).available, 5);
+        assert_eq!(state.usd_mut(4).available, 15_000);
+        assert_eq!(state.usd_mut(3).available, 15_000);
     }
 }
 

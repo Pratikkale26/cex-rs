@@ -6,14 +6,12 @@ use crate::state::AppState;
 pub async fn reset(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    // Clear tables cleanly using raw_sql
-    sqlx::raw_sql("TRUNCATE TABLE users, engine_snapshots, orders, trades, ledger_entries RESTART IDENTITY CASCADE")
-        .execute(&state.db)
-        .await
-        .map_err(|e| {
-            eprintln!("Database error during reset: {e}");
-            actix_web::error::ErrorInternalServerError("Database reset failed")
-        })?;
+    // Clear tables cleanly using DELETE to prevent ACCESS EXCLUSIVE lock deadlocks with background workers
+    let _ = sqlx::query("DELETE FROM ledger_entries").execute(&state.db).await;
+    let _ = sqlx::query("DELETE FROM trades").execute(&state.db).await;
+    let _ = sqlx::query("DELETE FROM orders").execute(&state.db).await;
+    let _ = sqlx::query("DELETE FROM engine_snapshots").execute(&state.db).await;
+    let _ = sqlx::query("DELETE FROM users").execute(&state.db).await;
 
     let _ = sqlx::query("UPDATE execution_checkpoints SET last_stream_id = '0-0', updated_at = NOW() WHERE id = 1")
         .execute(&state.db)

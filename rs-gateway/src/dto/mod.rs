@@ -94,8 +94,9 @@ fn default_order_type() -> String {
 
 impl Validate for OrderBody {
     fn validate(&self) -> Result<(), &'static str> {
-        if self.asset.to_lowercase() != "sol" {
-            return Err("Only SOL orders are supported");
+        let asset_lower = self.asset.to_lowercase();
+        if !matches!(asset_lower.as_str(), "sol" | "btc" | "eth") {
+            return Err("Supported assets are SOL, BTC, ETH");
         }
         if self.side != "bid" && self.side != "ask" {
             return Err("Side must be 'bid' or 'ask'");
@@ -138,6 +139,9 @@ mod tests {
     #[test]
     fn test_order_validation() {
         assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_ok());
+        assert!(OrderBody { asset: "btc".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_ok());
+        assert!(OrderBody { asset: "eth".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_ok());
+        assert!(OrderBody { asset: "doge".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_err());
         assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: Some("GTC".into()) }.validate().is_ok());
         assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: Some("IOC".into()) }.validate().is_ok());
         assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: Some("FOK".into()) }.validate().is_ok());
@@ -145,7 +149,6 @@ mod tests {
         assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "market".into(), price: 0, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_ok());
         assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "market".into(), price: 0, qty: 10, slippage_pct: Some(2.5), time_in_force: None }.validate().is_ok());
         assert!(OrderBody { asset: "sol".into(), side: "ask".into(), order_type: "market".into(), price: 0, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_ok());
-        assert!(OrderBody { asset: "btc".into(), side: "bid".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_err());
         assert!(OrderBody { asset: "sol".into(), side: "hold".into(), order_type: "limit".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_err());
         assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "invalid".into(), price: 100, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_err());
         assert!(OrderBody { asset: "sol".into(), side: "bid".into(), order_type: "limit".into(), price: 0, qty: 10, slippage_pct: None, time_in_force: None }.validate().is_err());

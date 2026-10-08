@@ -159,35 +159,38 @@ async fn run_worker(client: redis::Client, db_pool: PgPool) {
 
                         // 3. Double-entry ledger entries for trade:
                         let trade_ref = format!("{}-{}", maker_order_id, taker_order_id);
+                        let base_currency = market.split('_').next().unwrap_or("SOL");
 
-                        // Buyer: -(quote_amount + buyer_fee) USD (debit from locked), +qty SOL (credit to available)
+                        // Buyer: -(quote_amount + buyer_fee) USD (debit from locked), +qty base_currency (credit to available)
                         let buyer_usd_deduction = (quote_amount + buyer_fee) as i64;
                         let _ = sqlx::query(
                             r#"
                             INSERT INTO ledger_entries (user_id, currency, amount, balance_type, operation_type, reference_id)
                             VALUES ($1, 'USD', $2, 'locked', 'trade_fill', $3),
-                                   ($1, 'SOL', $4, 'available', 'trade_fill', $3)
+                                   ($1, $4, $5, 'available', 'trade_fill', $3)
                             "#
                         )
                         .bind(buyer_id as i64)
                         .bind(-buyer_usd_deduction)
                         .bind(&trade_ref)
+                        .bind(base_currency)
                         .bind(qty as i64)
                         .execute(&mut *tx)
                         .await;
 
-                        // Seller: +(quote_amount - seller_fee) USD (credit to available), -qty SOL (debit from locked)
+                        // Seller: +(quote_amount - seller_fee) USD (credit to available), -qty base_currency (debit from locked)
                         let seller_usd_credit = (quote_amount.saturating_sub(seller_fee)) as i64;
                         let _ = sqlx::query(
                             r#"
                             INSERT INTO ledger_entries (user_id, currency, amount, balance_type, operation_type, reference_id)
                             VALUES ($1, 'USD', $2, 'available', 'trade_fill', $3),
-                                   ($1, 'SOL', $4, 'locked', 'trade_fill', $3)
+                                   ($1, $4, $5, 'locked', 'trade_fill', $3)
                             "#
                         )
                         .bind(seller_id as i64)
                         .bind(seller_usd_credit)
                         .bind(&trade_ref)
+                        .bind(base_currency)
                         .bind(-(qty as i64))
                         .execute(&mut *tx)
                         .await;

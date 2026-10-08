@@ -65,6 +65,7 @@ async fn setup_app_state() -> Option<(web::Data<AppState>, tokio::task::JoinHand
     setup_test_env().await.map(|(state, handle, _, _, _)| (state, handle))
 }
 
+#[serial]
 #[actix_web::test]
 async fn test_validation_rejects_invalid_signup() {
     let (app_state, _engine) = match setup_app_state().await {
@@ -104,6 +105,7 @@ async fn test_validation_rejects_invalid_signup() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+#[serial]
 #[actix_web::test]
 async fn test_unauthorized_endpoints_without_jwt() {
     let (app_state, _engine) = match setup_app_state().await {
@@ -1369,6 +1371,230 @@ async fn test_maker_taker_fee_schedules_and_treasury_accounting() {
     .await
     .unwrap();
     assert_eq!(sol_sum, Some(0), "Total SOL ledger sum must be exactly 0");
+
+    engine_handle.abort();
+}
+
+#[serial]
+#[actix_web::test]
+async fn test_multi_market_trading_btc_eth_and_sol() {
+    let (app_state, engine_handle, db_pool, _redis_client, _engine_state) = match setup_test_env().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .configure(routes::configure),
+    )
+    .await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Sign up and sign in Buyer (Alice)
+    let req = test::TestRequest::post()
+        .uri("/signup")
+        .set_json(serde_json::json!({
+            "username": "multimarket_alice",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::post()
+        .uri("/signin")
+        .set_json(serde_json::json!({
+            "username": "multimarket_alice",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let alice_login: serde_json::Value = test::read_body_json(resp).await;
+    let alice_token = alice_login["token"].as_str().unwrap();
+
+    // 3. Sign up and sign in Seller (Bob)
+    let req = test::TestRequest::post()
+        .uri("/signup")
+        .set_json(serde_json::json!({
+            "username": "multimarket_bob",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::post()
+        .uri("/signin")
+        .set_json(serde_json::json!({
+            "username": "multimarket_bob",
+            "password": "Password123!"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let bob_login: serde_json::Value = test::read_body_json(resp).await;
+    let bob_token = bob_login["token"].as_str().unwrap();
+
+    // 4. Fund Alice: Onramp $100,000 USD
+    let req = test::TestRequest::post()
+        .uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "qty": 100_000 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 5. Fund Bob: Deposit 2 BTC and 10 ETH
+    let req = test::TestRequest::post()
+        .uri("/deposit/btc")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 2 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = test::TestRequest::post()
+        .uri("/deposit/eth")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 10 }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 6. Verify Bob's stock balances
+    let req = test::TestRequest::get().uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {bob_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let bob_bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bob_bal["stockBalance"]["btc"]["available"], 2);
+    assert_eq!(bob_bal["stockBalance"]["eth"]["available"], 10);
+
+    // 7. Bob places limit sell for 1 BTC @ 40,000
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "btc",
+            "side": "ask",
+            "price": 40_000,
+            "qty": 1
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 8. Bob places limit sell for 5 ETH @ 3,000
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "eth",
+            "side": "ask",
+            "price": 3_000,
+            "qty": 5
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 9. Verify orderbooks for both markets
+    let req = test::TestRequest::get().uri("/orderbook/btc").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let btc_depth: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(btc_depth["orderbook"]["asks"].as_array().unwrap().len(), 1);
+
+    let req = test::TestRequest::get().uri("/orderbook/eth").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let eth_depth: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(eth_depth["orderbook"]["asks"].as_array().unwrap().len(), 1);
+
+    // 10. Alice buys 1 BTC @ 40,000
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({
+            "asset": "btc",
+            "side": "bid",
+            "price": 40_000,
+            "qty": 1
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 11. Alice buys 5 ETH @ 3,000
+    let req = test::TestRequest::post()
+        .uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({
+            "asset": "eth",
+            "side": "bid",
+            "price": 3_000,
+            "qty": 5
+        }))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 12. Check Alice balances:
+    // Spent 40,000 (BTC) + 15,000 (ETH) = 55,000 USD.
+    // Has 1 BTC and 5 ETH.
+    let req = test::TestRequest::get().uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {alice_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let alice_bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(alice_bal["usdBalance"]["available"], 45_000);
+    assert_eq!(alice_bal["stockBalance"]["btc"]["available"], 1);
+    assert_eq!(alice_bal["stockBalance"]["eth"]["available"], 5);
+
+    // 13. Check Bob balances:
+    // Started with 2 BTC, 10 ETH. Sold 1 BTC, 5 ETH.
+    // Received 40,000 + 15,000 = 55,000 USD.
+    let req = test::TestRequest::get().uri("/balance")
+        .insert_header(("Authorization", format!("Bearer {bob_token}"))).to_request();
+    let resp = test::call_service(&app, req).await;
+    let bob_bal: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(bob_bal["usdBalance"]["available"], 55_000);
+    assert_eq!(bob_bal["stockBalance"]["btc"]["available"], 1);
+    assert_eq!(bob_bal["stockBalance"]["eth"]["available"], 5);
+
+    // 14. Allow cold-path worker to persist DB records
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 15. Check trades in DB
+    let btc_trades_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM trades WHERE market = 'BTC_USD'"
+    )
+    .fetch_one(&db_pool)
+    .await
+    .unwrap();
+    assert_eq!(btc_trades_count, 1, "Must have exactly 1 BTC trade recorded");
+
+    let eth_trades_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM trades WHERE market = 'ETH_USD'"
+    )
+    .fetch_one(&db_pool)
+    .await
+    .unwrap();
+    assert_eq!(eth_trades_count, 1, "Must have exactly 1 ETH trade recorded");
+
+    // 16. Mathematical verification of zero-sum double-entry ledger conservation invariant
+    for currency in ["USD", "BTC", "ETH"] {
+        let sum: Option<i64> = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount), 0)::BIGINT FROM ledger_entries WHERE currency = $1"
+        )
+        .bind(currency)
+        .fetch_one(&db_pool)
+        .await
+        .unwrap();
+        assert_eq!(sum, Some(0), "Total {currency} ledger sum must be exactly 0");
+    }
 
     engine_handle.abort();
 }

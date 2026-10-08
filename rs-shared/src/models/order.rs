@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_market() -> String {
+    "SOL_USD".to_string()
+}
+
 /// One open order as returned to the client.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -9,6 +13,8 @@ pub struct OpenOrderInfo {
     pub side:          String, // "bid" | "ask"
     pub price:         u64,
     pub remaining_qty: u64,
+    #[serde(default = "default_market")]
+    pub market:        String,
 }
 
 /// One price level in the orderbook snapshot.
