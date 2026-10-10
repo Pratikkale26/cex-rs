@@ -3,9 +3,12 @@ pub mod execution;
 pub mod order;
 pub mod requests;
 pub mod responses;
+pub mod ws;
 
 pub use balance::*;
 pub use execution::*;
 pub use order::*;
 pub use requests::*;
 pub use responses::*;
+pub use ws::*;
+

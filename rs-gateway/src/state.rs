@@ -3,11 +3,14 @@ use std::sync::Arc;
 use sqlx::PgPool;
 use tokio::sync::{oneshot, Mutex};
 
+use crate::ws::BroadcasterHub;
+
 pub struct AppState {
     pub db:              PgPool,
     pub redis_publisher: Mutex<redis::aio::MultiplexedConnection>,
     pub pending:         Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     pub queue_id:        String,
+    pub ws_hub:          Arc<BroadcasterHub>,
 }
 
 impl AppState {
@@ -16,12 +19,14 @@ impl AppState {
         publisher: redis::aio::MultiplexedConnection,
         pending: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
         queue_id: String,
+        ws_hub: Arc<BroadcasterHub>,
     ) -> Self {
         Self {
             db,
             redis_publisher: Mutex::new(publisher),
             pending,
             queue_id,
+            ws_hub,
         }
     }
 }

@@ -38,7 +38,10 @@ async fn setup_bench_env() -> Option<(
 
     let _listener_handle = rs_gateway::redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
     let worker_handle = rs_gateway::ledger::start_execution_worker(client.clone(), db_pool.clone());
-    let app_state = web::Data::new(AppState::new(db_pool.clone(), publisher, pending, queue_id));
+    let ws_hub = rs_gateway::ws::BroadcasterHub::new();
+    let app_state = web::Data::new(AppState::new(db_pool.clone(), publisher, pending, queue_id, ws_hub));
+
+
 
     // Spawn Matching Engine
     #[allow(deprecated)]

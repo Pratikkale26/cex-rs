@@ -72,3 +72,15 @@ impl FromRequest for AuthUser {
         }
     }
 }
+
+/// Verifies a JWT token string and returns decoded claims.
+pub fn verify_token(token: &str) -> Result<Claims, AuthError> {
+    decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(JWT_SECRET),
+        &Validation::default(),
+    )
+    .map(|data| data.claims)
+    .map_err(|_| AuthError)
+}
+

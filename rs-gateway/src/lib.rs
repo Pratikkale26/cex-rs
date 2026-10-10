@@ -5,6 +5,7 @@ pub mod rate_limit;
 pub mod redis;
 pub mod routes;
 pub mod state;
+pub mod ws;
 
 // Backward-compatibility aliases for any existing internal paths
 pub mod types {

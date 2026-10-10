@@ -5,6 +5,7 @@ pub mod ledger;
 pub mod orderbook;
 pub mod orders;
 pub mod trades;
+pub mod ws;
 
 use actix_web::web;
 
@@ -28,6 +29,9 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         // Market depth & trades routes (Public)
         .route("/orderbook/{asset}", web::get().to(orderbook::get_orderbook))
         .route("/trades/{asset}", web::get().to(trades::get_market_trades))
+        // Real-Time WebSocket Streaming (Public & Authenticated)
+        .route("/ws", web::get().to(ws::ws_handler))
         // Admin / Test suite reset (Public)
         .route("/reset", web::post().to(admin::reset));
 }
+

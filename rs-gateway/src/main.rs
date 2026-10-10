@@ -55,7 +55,12 @@ async fn main() -> std::io::Result<()> {
     // Spawn cold-path execution batch worker
     let worker_handle = ledger::start_execution_worker(client.clone(), db_pool.clone());
 
-    let app_state = web::Data::new(AppState::new(db_pool, publisher, pending, queue_id));
+    // Spawn WebSocket real-time event listener
+    let ws_hub = ws::BroadcasterHub::new();
+    let ws_listener_handle = ws::start_ws_stream_listener(client.clone(), ws_hub.clone());
+
+    let app_state = web::Data::new(AppState::new(db_pool, publisher, pending, queue_id, ws_hub));
+
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PORT")
@@ -91,6 +96,7 @@ async fn main() -> std::io::Result<()> {
     }
 
     worker_handle.abort();
+    ws_listener_handle.abort();
     listener_handle.abort();
     println!("rs-gateway: Shutdown complete.");
     Ok(())

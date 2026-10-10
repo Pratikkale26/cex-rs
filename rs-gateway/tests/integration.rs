@@ -41,7 +41,9 @@ async fn setup_test_env() -> Option<(
 
     let _listener_handle = rs_gateway::redis::start_response_listener(listener, Arc::clone(&pending), reply_queue);
     let _worker_handle = rs_gateway::ledger::start_execution_worker(client.clone(), db_pool.clone());
-    let app_state = web::Data::new(AppState::new(db_pool.clone(), publisher, pending, queue_id));
+    let ws_hub = rs_gateway::ws::BroadcasterHub::new();
+    let _ws_listener_handle = rs_gateway::ws::start_ws_stream_listener(client.clone(), ws_hub.clone());
+    let app_state = web::Data::new(AppState::new(db_pool.clone(), publisher, pending, queue_id, ws_hub));
 
     // Spawn an in-process Matching Engine for the integration test
     #[allow(deprecated)]
@@ -1598,6 +1600,113 @@ async fn test_multi_market_trading_btc_eth_and_sol() {
 
     engine_handle.abort();
 }
+
+#[serial]
+#[actix_web::test]
+async fn test_websocket_realtime_streaming_lifecycle() {
+    let (app_state, engine_handle, _db_pool, _redis_client, _engine_state) = match setup_test_env().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .configure(routes::configure),
+    )
+    .await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Test WebSocket handshake upgrade request returns 101 Switching Protocols
+    let ws_req = test::TestRequest::get()
+        .uri("/ws")
+        .insert_header(("Connection", "Upgrade"))
+        .insert_header(("Upgrade", "websocket"))
+        .insert_header(("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="))
+        .insert_header(("Sec-WebSocket-Version", "13"))
+        .to_request();
+    let ws_resp = test::call_service(&app, ws_req).await;
+    assert_eq!(ws_resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+
+    // 3. Register a test WebSocket client into the BroadcasterHub to monitor live events
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_id = app_state.ws_hub.register(tx).await;
+    app_state.ws_hub.subscribe(client_id, "trades:BTC_USD".to_string()).await;
+
+    // 4. Register Alice (Buyer) and Bob (Seller)
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "ws_alice", "password": "Password123!" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "ws_alice", "password": "Password123!" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let alice_login: serde_json::Value = test::read_body_json(resp).await;
+    let alice_token = alice_login["token"].as_str().unwrap();
+
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "ws_bob", "password": "Password123!" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "ws_bob", "password": "Password123!" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let bob_login: serde_json::Value = test::read_body_json(resp).await;
+    let bob_token = bob_login["token"].as_str().unwrap();
+
+    // 5. Fund accounts: Alice $100,000 USD, Bob 2 BTC
+    let req = test::TestRequest::post().uri("/onramp")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({ "qty": 100_000 })).to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post().uri("/deposit/btc")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({ "qty": 2 })).to_request();
+    test::call_service(&app, req).await;
+
+    // 6. Bob places Maker limit sell: 1 BTC @ $45,000
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {bob_token}")))
+        .set_json(serde_json::json!({
+            "asset": "btc",
+            "side": "ask",
+            "price": 45_000,
+            "qty": 1
+        })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 7. Alice places Taker buy: 1 BTC @ $45,000
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {alice_token}")))
+        .set_json(serde_json::json!({
+            "asset": "btc",
+            "side": "bid",
+            "price": 45_000,
+            "qty": 1
+        })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 8. Wait for the Redis Stream listener to broadcast to the WebSocket Hub
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // 9. Verify the WebSocket client received the live Trade event
+    let ws_event_str = rx.recv().await.expect("Expected real-time trade event on WebSocket");
+    let ws_event: serde_json::Value = serde_json::from_str(&ws_event_str).expect("Valid JSON");
+    assert_eq!(ws_event["type"], "trade");
+    assert_eq!(ws_event["market"], "BTC_USD");
+    assert_eq!(ws_event["price"], 45_000);
+    assert_eq!(ws_event["qty"], 1);
+
+    // Clean up
+    app_state.ws_hub.unregister(client_id).await;
+    engine_handle.abort();
+}
+
 
 
 
