@@ -170,7 +170,7 @@ pub async fn handle_order(
                 }
             };
 
-            reply(publisher, &msg.queue_id, &OrderReply {
+            reply(publisher.as_deref_mut(), &msg.queue_id, &OrderReply {
                 identifier:  msg.identifier,
                 order_id,
                 status:      Some(status.to_string()),
@@ -271,7 +271,7 @@ pub async fn handle_order(
                         "unfilled"
                     };
 
-                    reply(publisher, &msg.queue_id, &OrderReply {
+                    reply(publisher.as_deref_mut(), &msg.queue_id, &OrderReply {
                         identifier:  msg.identifier,
                         order_id:    None,
                         status:      Some(status.to_string()),
@@ -375,7 +375,7 @@ pub async fn handle_order(
                         "unfilled"
                     };
 
-                    reply(publisher, &msg.queue_id, &OrderReply {
+                    reply(publisher.as_deref_mut(), &msg.queue_id, &OrderReply {
                         identifier:  msg.identifier,
                         order_id:    None,
                         status:      Some(status.to_string()),
@@ -385,6 +385,18 @@ pub async fn handle_order(
                 }
             }
         }
+    }
+
+    // Emit depth update for real-time WebSocket broadcast
+    if let Some(ob) = state.get_orderbook(&asset) {
+        let snap = ob.get_state();
+        let bids = snap.bids.into_iter().take(25).map(|l| (l.price, l.qty)).collect();
+        let asks = snap.asks.into_iter().take(25).map(|l| (l.price, l.qty)).collect();
+        emit_execution(publisher.as_deref_mut(), &ExecutionEvent::DepthUpdated {
+            market: market.clone(),
+            bids,
+            asks,
+        }).await;
     }
 }
 
@@ -481,6 +493,18 @@ pub async fn handle_cancel(
                 user_id:       cancelled.user_id,
                 remaining_qty: cancelled.remaining_qty,
             }).await;
+
+            let market = format!("{}_USD", asset.to_uppercase());
+            if let Some(ob) = state.get_orderbook(&asset) {
+                let snap = ob.get_state();
+                let bids = snap.bids.into_iter().take(25).map(|l| (l.price, l.qty)).collect();
+                let asks = snap.asks.into_iter().take(25).map(|l| (l.price, l.qty)).collect();
+                emit_execution(publisher.as_deref_mut(), &ExecutionEvent::DepthUpdated {
+                    market,
+                    bids,
+                    asks,
+                }).await;
+            }
 
             reply(publisher, &msg.queue_id, &CancelReply {
                 identifier:    msg.identifier,

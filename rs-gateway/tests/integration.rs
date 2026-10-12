@@ -1636,6 +1636,7 @@ async fn test_websocket_realtime_streaming_lifecycle() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let client_id = app_state.ws_hub.register(tx).await;
     app_state.ws_hub.subscribe(client_id, "trades:BTC_USD".to_string()).await;
+    app_state.ws_hub.subscribe(client_id, "depth:BTC_USD".to_string()).await;
 
     // 4. Register Alice (Buyer) and Bob (Seller)
     let req = test::TestRequest::post().uri("/signup")
@@ -1679,6 +1680,15 @@ async fn test_websocket_realtime_streaming_lifecycle() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::CREATED);
 
+    // Verify WebSocket client received real-time Depth update with Bob's resting ask
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let depth_event_str = rx.recv().await.expect("Expected real-time depth event on WebSocket");
+    let depth_event: serde_json::Value = serde_json::from_str(&depth_event_str).expect("Valid JSON");
+    assert_eq!(depth_event["type"], "depth");
+    assert_eq!(depth_event["market"], "BTC_USD");
+    assert_eq!(depth_event["asks"][0][0], 45_000);
+    assert_eq!(depth_event["asks"][0][1], 1);
+
     // 7. Alice places Taker buy: 1 BTC @ $45,000
     let req = test::TestRequest::post().uri("/order")
         .insert_header(("Authorization", format!("Bearer {alice_token}")))
@@ -1701,6 +1711,13 @@ async fn test_websocket_realtime_streaming_lifecycle() {
     assert_eq!(ws_event["market"], "BTC_USD");
     assert_eq!(ws_event["price"], 45_000);
     assert_eq!(ws_event["qty"], 1);
+
+    // 10. Verify the WebSocket client received updated Depth with filled ask removed
+    let cleared_depth_str = rx.recv().await.expect("Expected cleared depth event on WebSocket");
+    let cleared_depth: serde_json::Value = serde_json::from_str(&cleared_depth_str).expect("Valid JSON");
+    assert_eq!(cleared_depth["type"], "depth");
+    assert_eq!(cleared_depth["market"], "BTC_USD");
+    assert_eq!(cleared_depth["asks"].as_array().unwrap().len(), 0);
 
     // Clean up
     app_state.ws_hub.unregister(client_id).await;

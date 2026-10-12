@@ -41,6 +41,11 @@ pub enum ExecutionEvent {
         amount:         u64,
         operation_type: String, // "onramp" | "deposit"
     },
+    DepthUpdated {
+        market:         String,
+        bids:           Vec<(u64, u64)>, // (price, qty)
+        asks:           Vec<(u64, u64)>, // (price, qty)
+    },
 }
 
 /// Order record returned by API endpoints.

@@ -252,6 +252,7 @@ async fn run_worker(client: redis::Client, db_pool: PgPool) {
                         .execute(&mut *tx)
                         .await;
                     }
+                    ExecutionEvent::DepthUpdated { .. } => {}
                 }
             }
 

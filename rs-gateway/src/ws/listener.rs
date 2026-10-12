@@ -155,6 +155,16 @@ async fn run_listener(client: redis::Client, hub: Arc<BroadcasterHub>) {
                     }
 
                     ExecutionEvent::FundingExecuted { .. } => {}
+
+                    ExecutionEvent::DepthUpdated { market, bids, asks } => {
+                        let depth_msg = WsServerMsg::Depth {
+                            market: market.clone(),
+                            bids,
+                            asks,
+                        };
+                        let topic = format!("depth:{}", market.to_uppercase());
+                        hub.broadcast_topic(&topic, &depth_msg).await;
+                    }
                 }
             }
         }
