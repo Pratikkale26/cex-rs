@@ -51,6 +51,11 @@ pub async fn place_order(
         })));
     }
 
+    let market = format!("{}_USD", body.asset.to_uppercase());
+    let side_str = body.side.to_lowercase();
+    let type_str = body.order_type.to_lowercase();
+    crate::metrics::ORDERS_SUBMITTED.with_label_values(&[&market, &side_str, &type_str]).inc();
+
     Ok(HttpResponse::Created().json(serde_json::json!({
         "orderId": reply.order_id,
         "status": reply.status.as_deref().unwrap_or("open"),

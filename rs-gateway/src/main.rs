@@ -62,7 +62,7 @@ async fn main() -> std::io::Result<()> {
     let app_state = web::Data::new(AppState::new(db_pool, publisher, pending, queue_id, ws_hub));
 
 
-    let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -73,6 +73,24 @@ async fn main() -> std::io::Result<()> {
     let server = HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
+            .wrap_fn(|req, srv| {
+                use actix_web::dev::Service;
+                let start = std::time::Instant::now();
+                let method = req.method().to_string();
+                let path = req.path().to_string();
+                let fut = srv.call(req);
+                async move {
+                    let res = fut.await?;
+                    let status = res.status().as_u16().to_string();
+                    let elapsed = start.elapsed().as_secs_f64();
+                    if !path.starts_with("/metrics") {
+                        metrics::HTTP_REQUEST_DURATION
+                            .with_label_values(&[&method, &path, &status])
+                            .observe(elapsed);
+                    }
+                    Ok(res)
+                }
+            })
             .wrap(rate_limit::RateLimitMiddleware::default())
             .configure(routes::configure)
     })

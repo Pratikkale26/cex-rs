@@ -6,6 +6,7 @@ pub mod redis;
 pub mod routes;
 pub mod state;
 pub mod ws;
+pub mod metrics;
 
 // Backward-compatibility aliases for any existing internal paths
 pub mod types {

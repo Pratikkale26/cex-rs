@@ -1707,6 +1707,88 @@ async fn test_websocket_realtime_streaming_lifecycle() {
     engine_handle.abort();
 }
 
+#[serial]
+#[actix_web::test]
+async fn test_prometheus_metrics_endpoint() {
+    let (app_state, engine_handle, _db_pool, _redis_client, _engine_state) = match setup_test_env().await {
+        Some(res) => res,
+        None => return,
+    };
+
+    let app = test::init_service(
+        App::new()
+            .app_data(app_state.clone())
+            .configure(routes::configure),
+    )
+    .await;
+
+    // 1. Reset state
+    let req = test::TestRequest::post().uri("/reset").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 2. Fetch baseline /metrics
+    let req = test::TestRequest::get().uri("/metrics").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(content_type.contains("text/plain"), "Content-Type must be text/plain");
+
+    let initial_ws = rs_gateway::metrics::WS_ACTIVE_CONNECTIONS.get();
+    let body_bytes = test::read_body(resp).await;
+    let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+    assert!(body_str.contains(&format!("ws_active_connections {initial_ws}")));
+
+    // 3. Register a WebSocket connection and verify gauge updates
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let client_id = app_state.ws_hub.register(tx).await;
+
+    let req = test::TestRequest::get().uri("/metrics").to_request();
+    let resp = test::call_service(&app, req).await;
+    let body_str = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    assert!(body_str.contains(&format!("ws_active_connections {}", initial_ws + 1)));
+
+    // 4. Register and fund a user, then place an order
+    let req = test::TestRequest::post().uri("/signup")
+        .set_json(serde_json::json!({ "username": "metric_trader", "password": "Password123!" })).to_request();
+    test::call_service(&app, req).await;
+    let req = test::TestRequest::post().uri("/signin")
+        .set_json(serde_json::json!({ "username": "metric_trader", "password": "Password123!" })).to_request();
+    let resp = test::call_service(&app, req).await;
+    let login: serde_json::Value = test::read_body_json(resp).await;
+    let token = login["token"].as_str().unwrap();
+
+    let req = test::TestRequest::post().uri("/deposit/btc")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({ "qty": 5 })).to_request();
+    test::call_service(&app, req).await;
+
+    let req = test::TestRequest::post().uri("/order")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .set_json(serde_json::json!({
+            "asset": "btc",
+            "side": "ask",
+            "price": 50_000,
+            "qty": 2
+        })).to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 5. Verify /metrics records the submitted order
+    let req = test::TestRequest::get().uri("/metrics").to_request();
+    let resp = test::call_service(&app, req).await;
+    let body_str = String::from_utf8(test::read_body(resp).await.to_vec()).unwrap();
+    assert!(
+        body_str.contains("orders_submitted_total{market=\"BTC_USD\",order_type=\"limit\",side=\"ask\"}"),
+        "Metrics must record the submitted BTC_USD order"
+    );
+
+    // Clean up
+    app_state.ws_hub.unregister(client_id).await;
+    engine_handle.abort();
+}
+
+
 
 
 

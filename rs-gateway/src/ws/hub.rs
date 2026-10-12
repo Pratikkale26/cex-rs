@@ -35,6 +35,7 @@ impl BroadcasterHub {
         let id = self.next_client_id.fetch_add(1, Ordering::Relaxed);
         let mut clients = self.clients.write().await;
         clients.insert(id, ClientSession { tx, user_id: None });
+        crate::metrics::WS_ACTIVE_CONNECTIONS.inc();
         id
     }
 
@@ -43,7 +44,11 @@ impl BroadcasterHub {
         // 1. Remove from clients map and get user_id if authenticated
         let user_id = {
             let mut clients = self.clients.write().await;
-            clients.remove(&client_id).and_then(|s| s.user_id)
+            let removed = clients.remove(&client_id);
+            if removed.is_some() {
+                crate::metrics::WS_ACTIVE_CONNECTIONS.dec();
+            }
+            removed.and_then(|s| s.user_id)
         };
 
         // 2. Remove from topics
@@ -126,6 +131,7 @@ impl BroadcasterHub {
                 let _ = session.tx.send(payload.clone());
             }
         }
+        crate::metrics::WS_MESSAGES_BROADCAST.with_label_values(&[topic]).inc();
     }
 
     /// Sends a private message to all active sessions owned by an authenticated user.

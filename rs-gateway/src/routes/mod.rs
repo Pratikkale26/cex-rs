@@ -6,6 +6,7 @@ pub mod orderbook;
 pub mod orders;
 pub mod trades;
 pub mod ws;
+pub mod metrics;
 
 use actix_web::web;
 
@@ -31,6 +32,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/trades/{asset}", web::get().to(trades::get_market_trades))
         // Real-Time WebSocket Streaming (Public & Authenticated)
         .route("/ws", web::get().to(ws::ws_handler))
+        // Prometheus Metrics (Public)
+        .route("/metrics", web::get().to(metrics::get_metrics))
         // Admin / Test suite reset (Public)
         .route("/reset", web::post().to(admin::reset));
 }

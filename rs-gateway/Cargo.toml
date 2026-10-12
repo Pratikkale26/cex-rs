@@ -17,6 +17,8 @@ argon2       = "0.5"
 sqlx         = { version = "0.8", features = ["runtime-tokio", "postgres", "macros", "chrono"] }
 actix-ws     = "0.3"
 futures-util = "0.3"
+prometheus   = { version = "0.13", features = ["process"] }
+once_cell    = "1"
 
 
 [dev-dependencies]

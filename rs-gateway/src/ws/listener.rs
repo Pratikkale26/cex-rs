@@ -68,10 +68,16 @@ async fn run_listener(client: redis::Client, hub: Arc<BroadcasterHub>) {
                         quote_amount,
                         maker_remaining_qty,
                         taker_remaining_qty,
-                        buyer_fee: _,
-                        seller_fee: _,
+                        buyer_fee,
+                        seller_fee,
                     } => {
                         let timestamp = chrono::Utc::now().timestamp_millis();
+                        let clean_mkt = market.to_uppercase();
+                        crate::metrics::TRADES_EXECUTED.with_label_values(&[&clean_mkt]).inc();
+                        let total_fee = buyer_fee + seller_fee;
+                        if total_fee > 0 {
+                            crate::metrics::TREASURY_FEES_COLLECTED.with_label_values(&["USD"]).inc_by(total_fee);
+                        }
 
                         // 1. Broadcast public trade tick to "trades:<MARKET>"
                         let trade_msg = WsServerMsg::Trade {

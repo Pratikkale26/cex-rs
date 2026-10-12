@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: "cex-gateway"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["host.docker.internal:3000"]
+        labels:
+          environment: "local-dev"
+          service: "rs-gateway"
