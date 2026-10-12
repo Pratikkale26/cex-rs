@@ -2570,18 +2570,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rs-bot"
-version = "0.1.0"
-dependencies = [
- "rand 0.8.8",
- "reqwest",
- "rs-shared",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "rs-engine"
 version = "0.1.0"
 dependencies = [

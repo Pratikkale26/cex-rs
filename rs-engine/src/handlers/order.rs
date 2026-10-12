@@ -392,7 +392,7 @@ pub async fn handle_order(
         let snap = ob.get_state();
         let bids = snap.bids.into_iter().take(25).map(|l| (l.price, l.qty)).collect();
         let asks = snap.asks.into_iter().take(25).map(|l| (l.price, l.qty)).collect();
-        emit_execution(publisher.as_deref_mut(), &ExecutionEvent::DepthUpdated {
+        emit_execution(publisher, &ExecutionEvent::DepthUpdated {
             market: market.clone(),
             bids,
             asks,
