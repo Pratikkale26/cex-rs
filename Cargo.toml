@@ -1,5 +1,5 @@
 [workspace]
-members = ["rs-shared", "rs-engine", "rs-gateway"]
+members = ["rs-shared", "rs-engine", "rs-gateway", "rs-bot"]
 resolver = "3"
 
 [workspace.dependencies]
