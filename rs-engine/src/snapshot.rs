@@ -22,6 +22,18 @@ pub async fn save_snapshot(
     .execute(pool)
     .await?;
 
+    // Prune old snapshots to retain only the latest 3 and prevent database bloat
+    sqlx::query(
+        "DELETE FROM engine_snapshots
+         WHERE id NOT IN (
+             SELECT id FROM engine_snapshots
+             ORDER BY id DESC
+             LIMIT 3
+         )"
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
